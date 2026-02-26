@@ -1,20 +1,22 @@
 import { motion } from "framer-motion";
-import { Smartphone, Eye, Bot, Twitter, ArrowRight, Zap } from "lucide-react";
+import { Mic, Ear, Brain, BarChart3, ArrowRight, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { DetectionCard } from "@/components/DetectionCard";
-import { mockDetections } from "@/lib/mock-data";
+import { SpeechCard } from "@/components/SpeechCard";
+import { mockSpeeches, mockPoliticians } from "@/lib/mock-data";
 
 const steps = [
-  { icon: Eye, title: "Monitorização", desc: "O stream da ARTV é analisado diariamente das 10h às 17h." },
-  { icon: Bot, title: "Deteção por IA", desc: "Algoritmos de visão computacional detetam o uso de telemóveis." },
-  { icon: Smartphone, title: "Identificação", desc: "Reconhecimento facial identifica o deputado." },
-  { icon: Twitter, title: "Publicação", desc: "O clip é automaticamente publicado no X/Twitter." },
+  { icon: Ear, title: "Monitorização", desc: "As sessões plenárias da ARTV são descarregadas e processadas." },
+  { icon: Brain, title: "Transcrição por IA", desc: "Whisper transcreve o áudio e identifica os oradores." },
+  { icon: Mic, title: "Análise de discurso", desc: "Detetamos palavras de enchimento e medimos a qualidade." },
+  { icon: BarChart3, title: "Rankings", desc: "Deputados são classificados pelo rácio de enchimento." },
 ];
 
 const Index = () => {
-  const totalDetections = 103; // Will come from DB
-  const latestDetections = mockDetections.slice(0, 4);
+  const totalFillers = mockPoliticians.reduce((s, p) => s + p.total_filler_count, 0);
+  const totalSpeeches = mockPoliticians.reduce((s, p) => s + p.total_speeches, 0);
+  const avgRatio = mockPoliticians.filter(p => p.total_speeches > 0).reduce((s, p) => s + p.average_filler_ratio, 0) / mockPoliticians.filter(p => p.total_speeches > 0).length;
+  const latestSpeeches = mockSpeeches.slice(0, 4);
 
   return (
     <div className="min-h-screen">
@@ -30,60 +32,68 @@ const Index = () => {
           >
             <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/20 bg-primary/5 mb-8">
               <Zap className="h-3.5 w-3.5 text-primary" />
-              <span className="text-xs font-medium text-primary">Inspirado por Dries Depoorter</span>
+              <span className="text-xs font-medium text-primary">Análise de discurso parlamentar</span>
             </div>
             <h1 className="text-4xl sm:text-6xl lg:text-7xl font-bold tracking-tight leading-[1.1] mb-6">
-              Os{" "}
-              <span className="text-gradient-gold">Scrollers</span>
+              Quão vazio é o{" "}
+              <span className="text-gradient-gold">discurso</span>
               <br />
-              do Parlamento
+              parlamentar?
             </h1>
             <p className="text-lg sm:text-xl text-muted-foreground max-w-xl mx-auto mb-10">
-              A monitorizar o uso de telemóveis na Assembleia da República. Porque a transparência importa.
+              Analisamos as sessões plenárias para medir palavras de enchimento, tempo de discurso e participação dos deputados.
             </p>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Link to="/detections">
+              <Link to="/speeches">
                 <Button size="lg" className="gap-2 font-semibold">
-                  Ver deteções <ArrowRight className="h-4 w-4" />
+                  Ver discursos <ArrowRight className="h-4 w-4" />
                 </Button>
               </Link>
-              <a href="https://x.com" target="_blank" rel="noopener noreferrer">
+              <Link to="/stats">
                 <Button variant="outline" size="lg" className="gap-2">
-                  <Twitter className="h-4 w-4" /> Seguir no X
+                  <BarChart3 className="h-4 w-4" /> Estatísticas
                 </Button>
-              </a>
+              </Link>
             </div>
           </motion.div>
 
-          {/* Counter */}
+          {/* Counters */}
           <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: 0.3, duration: 0.5 }}
-            className="mt-16 flex justify-center"
+            className="mt-16 grid grid-cols-3 gap-4 max-w-lg mx-auto"
           >
-            <div className="glass-card glow-gold rounded-2xl px-10 py-6 text-center">
-              <p className="text-5xl sm:text-6xl font-bold text-gradient-gold font-mono">{totalDetections}</p>
-              <p className="text-sm text-muted-foreground mt-1">deteções até agora</p>
+            <div className="glass-card glow-gold rounded-2xl px-4 py-5 text-center">
+              <p className="text-3xl sm:text-4xl font-bold text-gradient-gold font-mono">{totalSpeeches}</p>
+              <p className="text-xs text-muted-foreground mt-1">discursos</p>
+            </div>
+            <div className="glass-card glow-gold rounded-2xl px-4 py-5 text-center">
+              <p className="text-3xl sm:text-4xl font-bold text-gradient-gold font-mono">{totalFillers}</p>
+              <p className="text-xs text-muted-foreground mt-1">enchimentos</p>
+            </div>
+            <div className="glass-card glow-gold rounded-2xl px-4 py-5 text-center">
+              <p className="text-3xl sm:text-4xl font-bold text-gradient-gold font-mono">{(avgRatio * 100).toFixed(1)}%</p>
+              <p className="text-xs text-muted-foreground mt-1">rácio médio</p>
             </div>
           </motion.div>
         </div>
       </section>
 
-      {/* Latest Catches */}
+      {/* Latest Speeches */}
       <section className="py-16 sm:py-24">
         <div className="container">
           <div className="flex items-center justify-between mb-8">
-            <h2 className="text-2xl sm:text-3xl font-bold">Últimas apanhadelas</h2>
-            <Link to="/detections">
+            <h2 className="text-2xl sm:text-3xl font-bold">Últimos discursos</h2>
+            <Link to="/speeches">
               <Button variant="ghost" className="gap-2 text-primary">
-                Ver todas <ArrowRight className="h-4 w-4" />
+                Ver todos <ArrowRight className="h-4 w-4" />
               </Button>
             </Link>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {latestDetections.map((d, i) => (
-              <DetectionCard key={d.id} {...d} index={i} />
+            {latestSpeeches.map((s, i) => (
+              <SpeechCard key={s.id} {...s} index={i} />
             ))}
           </div>
         </div>
@@ -117,7 +127,7 @@ const Index = () => {
       {/* Footer */}
       <footer className="border-t border-border/50 py-8">
         <div className="container text-center text-sm text-muted-foreground">
-          <p>Os Scrollers do Parlamento · Inspirado por <a href="https://driesdepoorter.be/theflemishscrollers/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">The Flemish Scrollers</a></p>
+          <p>Palavras do Parlamento · Fonte: <a href="https://canal.parlamento.pt/plenario" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">ARTV Plenário</a></p>
         </div>
       </footer>
     </div>

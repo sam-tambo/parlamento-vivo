@@ -14,109 +14,158 @@ export type Database = {
   }
   public: {
     Tables: {
-      detections: {
+      filler_words: {
         Row: {
-          confidence_score: number | null
-          created_at: string
-          detected_at: string
+          category: string
           id: string
-          politician_id: string
-          screenshot_url: string | null
-          session_date: string | null
-          tweet_url: string | null
-          tweeted: boolean
-          video_clip_url: string | null
+          word: string
         }
         Insert: {
-          confidence_score?: number | null
-          created_at?: string
-          detected_at?: string
+          category?: string
           id?: string
-          politician_id: string
-          screenshot_url?: string | null
-          session_date?: string | null
-          tweet_url?: string | null
-          tweeted?: boolean
-          video_clip_url?: string | null
+          word: string
         }
         Update: {
-          confidence_score?: number | null
-          created_at?: string
-          detected_at?: string
+          category?: string
           id?: string
-          politician_id?: string
-          screenshot_url?: string | null
-          session_date?: string | null
-          tweet_url?: string | null
-          tweeted?: boolean
-          video_clip_url?: string | null
+          word?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "detections_politician_id_fkey"
-            columns: ["politician_id"]
-            isOneToOne: false
-            referencedRelation: "politicians"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       politicians: {
         Row: {
+          average_filler_ratio: number
           created_at: string
           id: string
           name: string
           parlamento_url: string | null
           party: string
           photo_url: string | null
+          total_filler_count: number
+          total_speaking_seconds: number
+          total_speeches: number
         }
         Insert: {
+          average_filler_ratio?: number
           created_at?: string
           id?: string
           name: string
           parlamento_url?: string | null
           party: string
           photo_url?: string | null
+          total_filler_count?: number
+          total_speaking_seconds?: number
+          total_speeches?: number
         }
         Update: {
+          average_filler_ratio?: number
           created_at?: string
           id?: string
           name?: string
           parlamento_url?: string | null
           party?: string
           photo_url?: string | null
+          total_filler_count?: number
+          total_speaking_seconds?: number
+          total_speeches?: number
         }
         Relationships: []
       }
       sessions: {
         Row: {
           artv_stream_url: string | null
+          artv_video_url: string | null
           created_at: string
           date: string
           end_time: string | null
           id: string
           start_time: string | null
           status: string
+          total_filler_count: number | null
+          total_speaking_minutes: number | null
+          transcript_status: string
         }
         Insert: {
           artv_stream_url?: string | null
+          artv_video_url?: string | null
           created_at?: string
           date: string
           end_time?: string | null
           id?: string
           start_time?: string | null
           status?: string
+          total_filler_count?: number | null
+          total_speaking_minutes?: number | null
+          transcript_status?: string
         }
         Update: {
           artv_stream_url?: string | null
+          artv_video_url?: string | null
           created_at?: string
           date?: string
           end_time?: string | null
           id?: string
           start_time?: string | null
           status?: string
+          total_filler_count?: number | null
+          total_speaking_minutes?: number | null
+          transcript_status?: string
         }
         Relationships: []
+      }
+      speeches: {
+        Row: {
+          created_at: string
+          filler_ratio: number
+          filler_word_count: number
+          filler_words_detail: Json | null
+          id: string
+          politician_id: string
+          session_id: string
+          speaking_duration_seconds: number
+          total_word_count: number
+          transcript_excerpt: string | null
+        }
+        Insert: {
+          created_at?: string
+          filler_ratio?: number
+          filler_word_count?: number
+          filler_words_detail?: Json | null
+          id?: string
+          politician_id: string
+          session_id: string
+          speaking_duration_seconds?: number
+          total_word_count?: number
+          transcript_excerpt?: string | null
+        }
+        Update: {
+          created_at?: string
+          filler_ratio?: number
+          filler_word_count?: number
+          filler_words_detail?: Json | null
+          id?: string
+          politician_id?: string
+          session_id?: string
+          speaking_duration_seconds?: number
+          total_word_count?: number
+          transcript_excerpt?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "speeches_politician_id_fkey"
+            columns: ["politician_id"]
+            isOneToOne: false
+            referencedRelation: "politicians"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "speeches_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {

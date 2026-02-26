@@ -1,10 +1,10 @@
 import { Link, useLocation } from "react-router-dom";
-import { Smartphone, BarChart3, Users, Eye } from "lucide-react";
+import { Mic, BarChart3, Users, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { path: "/", label: "Início", icon: Smartphone },
-  { path: "/detections", label: "Deteções", icon: Eye },
+  { path: "/", label: "Início", icon: Mic },
+  { path: "/speeches", label: "Discursos", icon: MessageSquare },
   { path: "/politicians", label: "Deputados", icon: Users },
   { path: "/stats", label: "Estatísticas", icon: BarChart3 },
 ];
@@ -16,9 +16,9 @@ export function Navbar() {
     <nav className="sticky top-0 z-50 border-b border-border/50 bg-background/80 backdrop-blur-xl">
       <div className="container flex h-16 items-center justify-between">
         <Link to="/" className="flex items-center gap-2">
-          <Smartphone className="h-6 w-6 text-primary" />
+          <Mic className="h-6 w-6 text-primary" />
           <span className="text-lg font-bold tracking-tight">
-            <span className="text-gradient-gold">Scrollers</span>
+            <span className="text-gradient-gold">Palavras</span>
             <span className="text-muted-foreground font-normal ml-1 text-sm">PT</span>
           </span>
         </Link>
