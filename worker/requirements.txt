@@ -1,0 +1,4 @@
+openai-whisper>=20231117
+supabase>=2.0.0
+streamlink>=6.0.0
+yt-dlp>=2024.1.0
