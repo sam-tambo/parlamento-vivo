@@ -1,14 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Radio, ExternalLink, Zap, Clock, Play, Tv2,
-  Wifi, WifiOff, RefreshCw, CheckCircle2, AlertCircle,
+  Radio, ExternalLink, Zap, Clock, Tv2,
+  Wifi, WifiOff, CheckCircle2, AlertCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { PARTY_COLORS, mockPoliticians } from "@/lib/mock-data";
+import { PARTY_COLORS } from "@/lib/mock-data";
 import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS } from "@/lib/filler-words";
 import { useActiveSession, useTranscriptEvents, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
 import { ArtvPlayer } from "@/components/ArtvPlayer";
@@ -17,39 +17,13 @@ import { ArtvPlayer } from "@/components/ArtvPlayer";
 const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
 
-// ─── Demo simulation data ────────────────────────────────────────────────────
-const DEMO_EVENTS: Omit<TranscriptEvent, "id" | "created_at">[] = [
-  {
-    session_id: "demo", politician_id: mockPoliticians[2].id,
-    text_segment: "Senhor Presidente, portanto, nós temos aqui um problema que é, digamos, bastante complexo e que, basicamente, precisa de uma solução urgente. Ou seja, não podemos continuar a ignorar estes dados.",
-    filler_count: 5, total_words: 38, filler_words_found: { portanto: 1, digamos: 1, basicamente: 1, "ou seja": 1 },
-    start_seconds: 0, duration_seconds: 28, politician: mockPoliticians[2] as any,
-  },
-  {
-    session_id: "demo", politician_id: mockPoliticians[0].id,
-    text_segment: "Portanto, quero deixar claro que esta proposta, na verdade, vai ao encontro daquilo que todos nós queremos para o país. Os dados são inequívocos e a solução é necessária.",
-    filler_count: 2, total_words: 34, filler_words_found: { portanto: 1, "na verdade": 1 },
-    start_seconds: 30, duration_seconds: 26, politician: mockPoliticians[0] as any,
-  },
-  {
-    session_id: "demo", politician_id: mockPoliticians[5].id,
-    text_segment: "Bem, eu acho que, tipo, precisamos de olhar para isto de outra forma. Pronto, não podemos continuar a adiar decisões que são, efetivamente, urgentes e que afetam milhões de cidadãos.",
-    filler_count: 5, total_words: 36, filler_words_found: { bem: 1, tipo: 1, pronto: 1, efetivamente: 1 },
-    start_seconds: 58, duration_seconds: 30, politician: mockPoliticians[5] as any,
-  },
-  {
-    session_id: "demo", politician_id: mockPoliticians[3].id,
-    text_segment: "A nossa posição é clara: o mercado livre deve ser protegido e as regulamentações devem ser proporcionais aos objetivos que se pretendem alcançar. Não há alternativa responsável.",
-    filler_count: 0, total_words: 32, filler_words_found: {},
-    start_seconds: 90, duration_seconds: 29, politician: mockPoliticians[3] as any,
-  },
-  {
-    session_id: "demo", politician_id: mockPoliticians[8].id,
-    text_segment: "Portanto, digamos que, tipo, esta questão é, basicamente, uma questão de princípio. Portanto, nós não podemos, enfim, aceitar esta proposta de certa forma sem garantias claras.",
-    filler_count: 8, total_words: 35, filler_words_found: { portanto: 2, digamos: 1, tipo: 1, basicamente: 1, enfim: 1, "de certa forma": 1 },
-    start_seconds: 121, duration_seconds: 31, politician: mockPoliticians[8] as any,
-  },
-];
+// ─── Audio MIME type detection ───────────────────────────────────────────────
+function bestAudioMime(): string {
+  for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg"]) {
+    if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
 
 interface LiveEvent extends TranscriptEvent {
   id: string;
@@ -62,83 +36,147 @@ type CronState = "idle" | "running" | "ok" | "waiting" | "error";
 
 export default function AoVivo() {
   const [events, setEvents]           = useState<LiveEvent[]>([]);
-  const [isDemoMode, setIsDemoMode]   = useState(false);
-  const [demoRunning, setDemoRunning] = useState(false);
-  const [demoIndex, setDemoIndex]     = useState(0);
   const [cronState, setCronState]     = useState<CronState>("idle");
-  const [cronMsg, setCronMsg]         = useState<string>("A iniciar captura…");
+  const [cronMsg, setCronMsg]         = useState<string>("A aguardar vídeo…");
   const [sessionStats, setSessionStats] = useState({ totalFillers: 0, totalWords: 0, duration: 0, eventCount: 0 });
 
-  const feedRef         = useRef<HTMLDivElement>(null);
-  const demoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const seenIds         = useRef(new Set<string>());
-  const cronLock        = useRef(false); // prevent concurrent calls
+  const feedRef            = useRef<HTMLDivElement>(null);
+  const seenIds            = useRef(new Set<string>());
+  const captureActiveRef   = useRef(false);
+  const recorderRef        = useRef<MediaRecorder | null>(null);
+  const audioStreamRef     = useRef<MediaStream | null>(null);
 
   const { data: activeSession } = useActiveSession();
   const { data: existingEvents } = useTranscriptEvents(activeSession?.id);
 
-  // ── Server-side capture: call plenario-cron from the browser ─────────────
-  // plenario-cron runs in Deno Deploy (no CORS), discovers the ARTV HLS URL,
-  // downloads new segments, sends to Whisper, and inserts transcript_events.
-  // Results flow back via Supabase Realtime — no browser audio capture needed.
-  const triggerCron = useCallback(async () => {
-    if (cronLock.current) return;
-    cronLock.current = true;
+  // ── Send one audio chunk to the transcribe edge function ──────────────────
+  const sendChunk = useCallback(async (blob: Blob, sessionId: string | undefined) => {
+    if (!blob.size) return;
     setCronState("running");
-    setCronMsg("A descobrir stream e transcrever…");
+    setCronMsg("A transcrever com Whisper…");
+
+    const form = new FormData();
+    form.append("audio", blob, "chunk.webm");
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    };
+    if (sessionId) headers["x-session-id"] = sessionId;
 
     try {
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/plenario-cron`, {
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/transcribe`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-        },
-        body: "{}",
-        signal: AbortSignal.timeout(120_000),
+        headers,
+        body: form,
+        signal: AbortSignal.timeout(90_000),
       });
 
       if (!resp.ok) {
+        const err = await resp.json().catch(() => null) as Record<string, unknown> | null;
+        const msg = String(err?.error ?? `HTTP ${resp.status}`);
         setCronState("error");
-        setCronMsg(`Erro HTTP ${resp.status} — a tentar novamente em 60s`);
+        if (msg.includes("HF_TOKEN")) {
+          setCronMsg("⚠️ HF_TOKEN não configurado — adicione em Supabase → Settings → Edge Functions");
+        } else {
+          setCronMsg(`Erro: ${msg.slice(0, 120)}`);
+        }
         return;
       }
 
-      const r = await resp.json() as Record<string, unknown>;
+      const r = await resp.json() as { text: string; filler_count: number; total_words: number; filler_words: Record<string, number> };
 
-      if (r.skipped) {
-        setCronState("waiting");
-        setCronMsg("Fora do horário de transmissão (08–22h Lisboa)");
-      } else if (r.waiting) {
-        setCronState("waiting");
-        setCronMsg("Parlamento não está em transmissão agora");
-      } else if (r.error) {
-        setCronState("error");
-        setCronMsg(`${r.error}`);
-      } else if ((r.new_segments as number) > 0) {
+      if (!r.text?.trim()) {
         setCronState("ok");
-        const segs    = r.new_segments  as number;
-        const fillers = r.total_fillers as number ?? 0;
-        const words   = r.total_words   as number ?? 0;
-        setCronMsg(`✓ ${segs} segmentos · ${words} palavras · ${fillers} enchimentos detectados`);
-      } else {
-        setCronState("ok");
-        setCronMsg("✓ Em dia — sem novos segmentos (próxima verificação em 60s)");
+        setCronMsg("✓ Chunk sem fala detectada — próximo chunk em 30 s");
+        return;
       }
-    } catch {
-      setCronState("error");
-      setCronMsg("Erro de ligação — a tentar novamente em 60s");
-    } finally {
-      cronLock.current = false;
-    }
-  }, []);
 
-  // Auto-trigger every 60s (also runs immediately on mount)
+      setCronState("ok");
+      setCronMsg(`✓ ${r.total_words} palavras · ${r.filler_count} enchimentos`);
+
+      handleNewEvent({
+        id: crypto.randomUUID(),
+        session_id: sessionId ?? "live",
+        text_segment: r.text,
+        filler_count: r.filler_count,
+        total_words:  r.total_words,
+        filler_words_found: r.filler_words ?? {},
+        politician_id: null,
+        politician: null,
+        start_seconds: null,
+        duration_seconds: 30,
+        created_at: new Date().toISOString(),
+      } as any);
+    } catch (e) {
+      if (!captureActiveRef.current) return; // stopped — ignore
+      setCronState("error");
+      setCronMsg("Erro de ligação com o servidor de transcrição");
+      console.error("[capture] sendChunk error:", e);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Record one 30-second chunk, send it, then queue the next ─────────────
+  const recordChunk = useCallback((stream: MediaStream, sessionId: string | undefined) => {
+    if (!captureActiveRef.current) return;
+
+    const mimeType = bestAudioMime();
+    const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    const chunks: Blob[] = [];
+
+    rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    rec.onstop = () => {
+      const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+      sendChunk(blob, sessionId).then(() => {
+        // Immediately start the next chunk while transcription runs in parallel
+        if (captureActiveRef.current) recordChunk(stream, sessionId);
+      });
+    };
+
+    rec.start();
+    recorderRef.current = rec;
+    setTimeout(() => { if (rec.state === "recording") rec.stop(); }, 30_000);
+  }, [sendChunk]);
+
+  // ── Start browser audio capture from the <video> element ──────────────────
+  const startCapture = useCallback((video: HTMLVideoElement, sessionId: string | undefined) => {
+    if (captureActiveRef.current) return; // already running
+
+    if (typeof video.captureStream !== "function") {
+      setCronState("error");
+      setCronMsg("captureStream não suportado neste browser — use Chrome ou Firefox");
+      return;
+    }
+
+    try {
+      const stream = video.captureStream();
+      const audio  = stream.getAudioTracks();
+
+      if (!audio.length) {
+        setCronState("error");
+        setCronMsg("Sem pista de áudio no stream — verifique se o vídeo está a reproduzir");
+        return;
+      }
+
+      const audioStream = new MediaStream(audio);
+      audioStreamRef.current = audioStream;
+      captureActiveRef.current = true;
+
+      setCronState("running");
+      setCronMsg("Captura de áudio ativa — primeiro resultado em ~30 s");
+      recordChunk(audioStream, sessionId);
+    } catch (e) {
+      setCronState("error");
+      setCronMsg(`Erro ao capturar áudio: ${String((e as Error)?.message ?? e).slice(0, 100)}`);
+    }
+  }, [recordChunk]);
+
+  // ── Stop capture on unmount ────────────────────────────────────────────────
   useEffect(() => {
-    triggerCron();
-    const interval = setInterval(triggerCron, 60_000);
-    return () => clearInterval(interval);
-  }, [triggerCron]);
+    return () => {
+      captureActiveRef.current = false;
+      recorderRef.current?.stop();
+    };
+  }, []);
 
   // ── Load historical events ────────────────────────────────────────────────
   useEffect(() => {
@@ -183,31 +221,11 @@ export default function AoVivo() {
     feedRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [events.length]);
 
-  // ── Demo mode ─────────────────────────────────────────────────────────────
-  const startDemo = () => {
-    setDemoRunning(true); setIsDemoMode(true);
-    setEvents([]); setSessionStats({ totalFillers: 0, totalWords: 0, duration: 0, eventCount: 0 });
-    setDemoIndex(0);
-  };
-  useEffect(() => {
-    if (!demoRunning) { demoIntervalRef.current && clearInterval(demoIntervalRef.current); return; }
-    let idx = demoIndex;
-    const inject = () => {
-      const ev = DEMO_EVENTS[idx % DEMO_EVENTS.length];
-      handleNewEvent({ ...ev, id: crypto.randomUUID(), created_at: new Date().toISOString() } as any);
-      idx++; setDemoIndex(idx);
-    };
-    inject();
-    demoIntervalRef.current = setInterval(inject, 6000);
-    return () => { demoIntervalRef.current && clearInterval(demoIntervalRef.current); };
-  }, [demoRunning]); // eslint-disable-line
-  const stopDemo = () => { setDemoRunning(false); demoIntervalRef.current && clearInterval(demoIntervalRef.current); };
-
   // ── Derived state ─────────────────────────────────────────────────────────
-  const isCapturing   = cronState === "running";
-  const isLive        = isCapturing || !!activeSession || demoRunning;
-  const fillerRate    = sessionStats.totalWords > 0 ? sessionStats.totalFillers / sessionStats.totalWords : 0;
-  const grade         = gradeFillerRate(fillerRate);
+  const isCapturing    = captureActiveRef.current || cronState === "running";
+  const isLive         = isCapturing || !!activeSession;
+  const fillerRate     = sessionStats.totalWords > 0 ? sessionStats.totalFillers / sessionStats.totalWords : 0;
+  const grade          = gradeFillerRate(fillerRate);
   const currentSpeaker = events[0]?.politician ?? null;
 
   const cronStatusIcon = {
@@ -227,16 +245,14 @@ export default function AoVivo() {
         <div>
           <div className="flex items-center gap-2 mb-1">
             <h1 className="text-3xl sm:text-4xl font-bold">Plenário Ao Vivo</h1>
-            {(isLive || isDemoMode) && (
+            {isLive && (
               <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                isDemoMode
-                  ? "bg-amber-500/15 border border-amber-500/30 text-amber-400"
-                  : isCapturing
+                isCapturing
                   ? "bg-primary/15 border border-primary/30 text-primary"
                   : "bg-red-500/15 border border-red-500/30 text-red-400"
               }`}>
                 <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
-                {isDemoMode ? "DEMO" : isCapturing ? "A CAPTURAR" : "AO VIVO"}
+                {isCapturing ? "A CAPTURAR" : "AO VIVO"}
               </span>
             )}
           </div>
@@ -246,15 +262,6 @@ export default function AoVivo() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {!demoRunning ? (
-            <Button onClick={startDemo} variant="outline" className="gap-2">
-              <Play className="h-4 w-4" /> Demo
-            </Button>
-          ) : (
-            <Button onClick={stopDemo} variant="destructive" className="gap-2">
-              <WifiOff className="h-4 w-4" /> Parar Demo
-            </Button>
-          )}
           <a href="https://canal.parlamento.pt" target="_blank" rel="noopener noreferrer">
             <Button variant="outline" className="gap-2">
               <ExternalLink className="h-4 w-4" /> ARTV
@@ -276,31 +283,27 @@ export default function AoVivo() {
                 <span className="text-sm font-medium">Canal Parlamento — Ao Vivo</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground max-w-[260px] truncate">
+                <span className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground max-w-[300px] truncate">
                   {cronStatusIcon}
                   {cronMsg}
                 </span>
-                <Button
-                  size="sm" variant="outline" className="h-7 text-xs gap-1.5"
-                  onClick={triggerCron} disabled={isCapturing}
-                >
-                  {isCapturing
-                    ? <><Wifi className="h-3.5 w-3.5 animate-pulse" /> A capturar…</>
-                    : <><RefreshCw className="h-3.5 w-3.5" /> Capturar agora</>
-                  }
-                </Button>
               </div>
             </div>
 
             {/* hls.js player — LiveExtend CDN via hls-proxy (no iframe) */}
-            <ArtvPlayer streamUrl={activeSession?.artv_stream_url} />
+            <ArtvPlayer
+              streamUrl={activeSession?.artv_stream_url}
+              onReady={(video) => startCapture(video, activeSession?.id)}
+            />
 
             {/* Status bar */}
             <div className="px-4 py-2 text-xs text-muted-foreground flex items-center justify-between border-t border-border/40">
               <span>
-                {isCapturing
-                  ? "A descarregar segmentos · a transcrever com Whisper large-v3…"
-                  : "Captura automática a cada 60 s · primeiros resultados em ~30–60 s"}
+                {cronState === "running"
+                  ? "A capturar áudio do browser · enviando para Whisper large-v3…"
+                  : captureActiveRef.current
+                  ? "Captura ativa · resultados a cada 30 s"
+                  : "A aguardar início do stream para capturar áudio…"}
               </span>
               <a
                 href="https://canal.parlamento.pt"
@@ -397,8 +400,8 @@ export default function AoVivo() {
             <h3 className="font-semibold mb-2 text-sm">Como funciona</h3>
             <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside">
               <li>Stream ARTV via <strong>LiveExtend CDN</strong> · hls.js + proxy</li>
-              <li>Captura automática a cada <strong>60 s</strong> pelo servidor</li>
-              <li>Segmentos HLS descarregados e transcribed com <strong>Whisper</strong></li>
+              <li>Browser capta áudio diretamente do vídeo com <strong>MediaRecorder</strong></li>
+              <li>Chunk de 30 s enviado para <strong>Whisper large-v3</strong> (requer HF_TOKEN)</li>
               <li>Enchimentos detectados e pontuados por categoria</li>
               <li>Resultados em tempo real via <strong>Supabase Realtime</strong></li>
             </ol>

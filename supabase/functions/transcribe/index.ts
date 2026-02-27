@@ -232,6 +232,7 @@ async function identifySpeakerFromText(
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "authorization, content-type, x-session-id, x-politician-id",
 };
 

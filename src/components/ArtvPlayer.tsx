@@ -45,9 +45,11 @@ interface ArtvPlayerProps {
   /** Override URL from sessions.artv_stream_url (cached by plenario-cron). */
   streamUrl?: string | null;
   onStatus?: (s: Status) => void;
+  /** Called once the video element starts playing — lets the parent capture audio. */
+  onReady?: (video: HTMLVideoElement) => void;
 }
 
-export function ArtvPlayer({ streamUrl, onStatus }: ArtvPlayerProps) {
+export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef   = useRef<Hls | null>(null);
 
@@ -62,7 +64,8 @@ export function ArtvPlayer({ streamUrl, onStatus }: ArtvPlayerProps) {
   const updateStatus = useCallback((s: Status) => {
     setStatus(s);
     onStatus?.(s);
-  }, [onStatus]);
+    if (s === "playing" && videoRef.current) onReady?.(videoRef.current);
+  }, [onStatus, onReady]);
 
   useEffect(() => {
     const video = videoRef.current;
