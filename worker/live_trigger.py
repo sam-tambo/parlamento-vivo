@@ -5,20 +5,22 @@ live_trigger.py — GitHub Actions orchestrator for Plenário live transcription
 Runs every 5 minutes (via GitHub Actions cron).  Does exactly three things:
 
   1. Try yt-dlp to find the live ARTV HLS stream URL
-  2. Upsert today's live session in Supabase with that URL
-  3. POST to the Supabase `transcribe` edge function with the URL
+  2. Upsert today's live session in Lovable Cloud with that URL
+  3. POST to the `transcribe` Lovable edge function with the URL
      → edge function downloads segments, calls HF Whisper, detects fillers,
        inserts into transcript_events, fires Realtime to the UI
 
-Required environment variables (set as GitHub Actions secrets):
-  SUPABASE_URL          https://ugyvgtzsvhmcohnooxqp.supabase.co
-  SUPABASE_SERVICE_KEY  <service_role key from Supabase dashboard>
+Required GitHub Actions secret (Settings → Secrets → Actions):
+  LOVABLE_SERVICE_KEY  <service_role key — Lovable Cloud → project settings → API>
+
+The Lovable Cloud project URL is already embedded in this file.
+No other secrets or accounts needed — Lovable Cloud provides everything.
 
 No Python packages beyond the stdlib and yt-dlp are needed.
 
 Usage:
   pip install yt-dlp
-  SUPABASE_URL=... SUPABASE_SERVICE_KEY=... python worker/live_trigger.py
+  LOVABLE_SERVICE_KEY=... python worker/live_trigger.py
 """
 
 import json
@@ -32,8 +34,13 @@ from datetime import datetime, timezone, timedelta
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 ARTV_URL      = "https://canal.parlamento.pt/plenario"
-SUPABASE_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SERVICE_KEY   = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+# Lovable Cloud project URL (not secret — same value as VITE_SUPABASE_URL in .env).
+# Override with LOVABLE_URL env var if you ever migrate to a different project.
+SUPABASE_URL  = os.environ.get("LOVABLE_URL", "https://ugyvgtzsvhmcohnooxqp.supabase.co").rstrip("/")
+
+# Service-role key from Lovable Cloud → project settings → API → service_role
+SERVICE_KEY   = os.environ.get("LOVABLE_SERVICE_KEY", "")
 
 LISBON = timezone(timedelta(hours=0))   # WET (winter); WEST = +1 in summer
 # GitHub Actions cron already gates on weekday + hour; no need to re-check here
@@ -219,8 +226,8 @@ def trigger_transcription(session_id: str, hls_url: str) -> bool:
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not SUPABASE_URL or not SERVICE_KEY:
-        print("ERROR: Set SUPABASE_URL and SUPABASE_SERVICE_KEY", file=sys.stderr)
+    if not SERVICE_KEY:
+        print("ERROR: Set LOVABLE_SERVICE_KEY (Lovable Cloud → project settings → API → service_role)", file=sys.stderr)
         sys.exit(1)
 
     today = lisbon_today()

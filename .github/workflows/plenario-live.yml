@@ -4,13 +4,15 @@ name: Plenário Live Monitor
 # │ Runs every 5 minutes during Portuguese parliament hours (Mon–Fri 9am–8pm).
 # │ Each run:
 # │   1. yt-dlp discovers the live ARTV HLS stream URL (~10s)
-# │   2. Upserts today's live session in Supabase
-# │   3. POSTs to the `transcribe` Supabase edge function
+# │   2. Upserts today's live session in Lovable Cloud
+# │   3. POSTs to the `transcribe` Lovable edge function
 # │      → fetches ~30s of audio → HF Whisper → filler detection → DB → Realtime
 # │
-# │ REQUIRED GitHub repository secrets (Settings → Secrets → Actions):
-# │   SUPABASE_URL          https://ugyvgtzsvhmcohnooxqp.supabase.co
-# │   SUPABASE_SERVICE_KEY  <service_role key — Supabase dashboard → Project settings → API>
+# │ REQUIRED GitHub repository secret (Settings → Secrets → Actions → New secret):
+# │   LOVABLE_SERVICE_KEY  Lovable Cloud → project settings → API → service_role key
+# │
+# │ That is the ONLY secret needed. The Lovable Cloud project URL is already
+# │ embedded in worker/live_trigger.py — no SUPABASE_URL secret required.
 # └─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -49,8 +51,8 @@ jobs:
 
       - name: Run live trigger
         env:
-          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # Lovable Cloud service-role key (add under repo Settings → Secrets → Actions)
+          LOVABLE_SERVICE_KEY: ${{ secrets.LOVABLE_SERVICE_KEY }}
         run: python worker/live_trigger.py
 
       # ── Optional: upload logs for debugging ───────────────────────────────
