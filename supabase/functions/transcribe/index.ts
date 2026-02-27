@@ -104,29 +104,41 @@ async function transcribeWithHF(
 // ─── HLS audio fetcher ───────────────────────────────────────────────────────
 
 /**
- * Given a .m3u8 playlist URL, fetch the last `segmentCount` .ts segments
- * and return them concatenated as a Uint8Array.
+ * Fetch HLS segments and return them concatenated as a Uint8Array.
+ *
+ * Accepts EITHER:
+ *   - segment_urls: string[]  — explicit list (preferred; sent by plenario-cron)
+ *   - m3u8Url + segmentCount  — legacy: fetch last N from playlist
  *
  * MPEG-TS segments are sent directly to HF Whisper, which accepts them.
  */
 async function fetchHLSChunk(
   m3u8Url: string,
   segmentCount: number = 5,
+  explicitUrls?: string[],
 ): Promise<Uint8Array> {
-  const playlistResp = await fetch(m3u8Url, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)" },
-  });
-  if (!playlistResp.ok) throw new Error(`M3U8 fetch failed: ${playlistResp.status}`);
+  let segmentUrls: string[];
 
-  const playlist = await playlistResp.text();
-  const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf("/") + 1);
+  if (explicitUrls && explicitUrls.length > 0) {
+    // Preferred path: caller already resolved which segments to use
+    segmentUrls = explicitUrls;
+  } else {
+    // Legacy path: take last N from the playlist (may overlap between calls)
+    const playlistResp = await fetch(m3u8Url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)" },
+    });
+    if (!playlistResp.ok) throw new Error(`M3U8 fetch failed: ${playlistResp.status}`);
 
-  const segmentUrls = playlist
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .slice(-segmentCount)
-    .map((url) => (url.startsWith("http") ? url : baseUrl + url));
+    const playlist = await playlistResp.text();
+    const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf("/") + 1);
+
+    segmentUrls = playlist
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .slice(-segmentCount)
+      .map((url) => (url.startsWith("http") ? url : baseUrl + url));
+  }
 
   if (segmentUrls.length === 0) throw new Error("No segments found in playlist");
 
@@ -186,7 +198,11 @@ Deno.serve(async (req: Request) => {
       // Caller passed { audio_url, m3u8_url, segment_count? }
       const body = await req.json();
 
-      if (body.m3u8_url) {
+      if (body.segment_urls && Array.isArray(body.segment_urls) && body.segment_urls.length > 0) {
+        // Preferred: explicit segment URL list from plenario-cron (no duplicate processing)
+        console.log(`[transcribe] Fetching ${body.segment_urls.length} explicit segments`);
+        audioBytes = await fetchHLSChunk("", 0, body.segment_urls);
+      } else if (body.m3u8_url) {
         console.log(`[transcribe] Fetching HLS from ${body.m3u8_url}`);
         audioBytes = await fetchHLSChunk(body.m3u8_url, body.segment_count ?? 5);
       } else if (body.audio_url) {

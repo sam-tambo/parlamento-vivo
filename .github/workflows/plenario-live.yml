@@ -17,10 +17,11 @@ name: Plenário Live Monitor
 
 on:
   schedule:
-    # Every 5 min, Mon–Fri, 08:00–20:00 UTC
+    # Every 1 min, Mon–Fri, 08:00–20:00 UTC.
     # Portugal is UTC+0 (WET, Oct–Mar) or UTC+1 (WEST, Mar–Oct).
-    # 08:00 UTC covers 09:00 Lisbon in winter and 09:00 in summer (WEST, UTC+1 starts at 01:00).
-    - cron: '*/5 8-20 * * 1-5'
+    # 08:00 UTC = 09:00 Lisbon in winter / 09:00 in summer (WEST = UTC+1).
+    # Note: GitHub Actions minimum resolution is 1 minute.
+    - cron: '* 8-20 * * 1-5'
   workflow_dispatch:
     # Allow manual trigger from GitHub UI (useful for testing + first run)
     inputs:
