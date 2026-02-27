@@ -142,11 +142,17 @@ async function fetchHLSChunk(
 
   if (segmentUrls.length === 0) throw new Error("No segments found in playlist");
 
+  // CDN (livextend.cloud and parlamento.pt) requires Referer + Origin from the
+  // parliament website; without them the CDN returns 403 host_not_allowed.
+  const CDN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)",
+    "Referer":    "https://canal.parlamento.pt/",
+    "Origin":     "https://canal.parlamento.pt",
+  };
+
   const buffers = await Promise.all(
     segmentUrls.map((url) =>
-      fetch(url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)" },
-      }).then((r) => {
+      fetch(url, { headers: CDN_HEADERS }).then((r) => {
         if (!r.ok) throw new Error(`Segment fetch failed: ${r.status} ${url}`);
         return r.arrayBuffer();
       })
@@ -211,7 +217,7 @@ async function identifySpeakerFromText(
         .select("id, name")
         .or(`name.ilike.%${word}%,full_name.ilike.%${word}%`)
         .limit(1)
-        .single();
+        .maybeSingle();
       if (data) {
         console.log(`[transcribe] Speaker from text: "${data.name}" (matched "${word}")`);
         return data.id as string;

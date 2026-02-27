@@ -225,24 +225,11 @@ async function fetchPage(url: string): Promise<string | null> {
   } catch { return null; }
 }
 
-/** Full 5-stage ARTV HLS URL discovery */
-async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
-  // A. Use cached URL if still valid
-  if (stored?.includes(".m3u8")) {
-    const ok = await probeHls(stored);
-    if (ok) return stored;
-    console.warn("[cron] Cached HLS URL expired, re-discovering…");
-  }
-
-  // B. IPTV playlist (community-maintained, most reliable external source)
-  const iptvUrl = await discoverFromIptvPlaylist();
-  if (iptvUrl) return iptvUrl;
-
-  // B2. JSON API probes (fast, no HTML parsing needed)
-  const apiUrl = await discoverFromApi();
-  if (apiUrl) return apiUrl;
-
-  // C+D. Scrape HTML of the two main pages
+/**
+ * Stage C+D: scrape canal.parlamento.pt HTML for an embedded .m3u8 URL.
+ * Checks __NEXT_DATA__, full HTML regex, and linked player JS bundles.
+ */
+async function discoverFromHtml(): Promise<string | null> {
   const pagesToScrape = [
     "https://canal.parlamento.pt/plenario",
     "https://canal.parlamento.pt",
@@ -252,38 +239,38 @@ async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
     const html = await fetchPage(pageUrl);
     if (!html) continue;
 
-    // C. Next.js __NEXT_DATA__ (fast parse, reliable if Next.js is used)
     const nextUrl = extractFromNextData(html);
     if (nextUrl) {
       const ok = await probeHls(nextUrl);
       if (ok) { console.log(`[cron] Next.js data hit: ${nextUrl}`); return nextUrl; }
     }
 
-    // D. Full HTML regex scan
     const htmlUrl = extractFromHtml(html, pageUrl);
     if (htmlUrl) {
       const ok = await probeHls(htmlUrl);
       if (ok) { console.log(`[cron] HTML scan hit: ${htmlUrl}`); return htmlUrl; }
     }
 
-    // D2. Also scan any inline <script src="..."> chunks that might embed the player
     const scriptSrcs = [...html.matchAll(/src=["'](https?:[^"']+\.js[^"']*)/gi)]
       .map(m => m[1])
       .filter(s => /player|video|stream|hls/i.test(s))
-      .slice(0, 3); // limit to avoid too many requests
+      .slice(0, 3);
 
-    for (const scriptSrc of scriptSrcs) {
-      const js = await fetchPage(scriptSrc);
+    for (const src of scriptSrcs) {
+      const js = await fetchPage(src);
       if (!js) continue;
-      const jsUrl = extractFromHtml(js, scriptSrc);
+      const jsUrl = extractFromHtml(js, src);
       if (jsUrl) {
         const ok = await probeHls(jsUrl);
         if (ok) { console.log(`[cron] JS bundle hit: ${jsUrl}`); return jsUrl; }
       }
     }
   }
+  return null;
+}
 
-  // E. Parallel probe of all known CDN candidates (last resort)
+/** Stage E: probe all known CDN candidates in parallel — typically fastest. */
+async function discoverFromCdnCandidates(): Promise<string | null> {
   console.log("[cron] Probing CDN candidates in parallel…");
   const results = await Promise.all(HLS_CANDIDATES.map(u => probeHls(u)));
   for (let i = 0; i < results.length; i++) {
@@ -292,8 +279,41 @@ async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
       return HLS_CANDIDATES[i];
     }
   }
-
   return null;
+}
+
+/**
+ * Full ARTV HLS URL discovery.
+ *
+ * Stage A: validate cached URL (fast, ~1–8 s).
+ * Stages B–E: run ALL discovery methods in parallel via Promise.race so the
+ * fastest winner (usually the CDN probe at ~8 s) terminates the race, instead
+ * of waiting for slower sequential stages that can total > 120 s.
+ */
+async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
+  // A. Use cached URL if still valid — avoids all network discovery on hot path
+  if (stored?.includes(".m3u8")) {
+    const ok = await probeHls(stored);
+    if (ok) return stored;
+    console.warn("[cron] Cached HLS URL expired, re-discovering…");
+  }
+
+  // B–E. "First non-null wins" across all discovery strategies run in parallel.
+  // CDN parallel probe (stage E) typically resolves in ~8 s when the stream
+  // is live — far faster than the sequential HTML-scraping path (up to 90 s).
+  //
+  // We use Promise.any semantics: each strategy rejects when it returns null
+  // so Promise.any naturally skips null results and resolves on the first
+  // actual URL found. If everything fails, AggregateError → return null.
+  const winner = await Promise.any(
+    [discoverFromCdnCandidates, discoverFromIptvPlaylist, discoverFromApi, discoverFromHtml]
+      .map(fn => fn().then(url => {
+        if (url) return url;
+        return Promise.reject(new Error("no url"));
+      }))
+  ).catch(() => null);
+
+  return winner;
 }
 
 // ─── Speaker identification ───────────────────────────────────────────────────
@@ -351,7 +371,7 @@ async function fetchCurrentSpeaker(
           .select("id, name")
           .or(`name.ilike.%${word}%,full_name.ilike.%${word}%`)
           .limit(1)
-          .single();
+          .maybeSingle();
         if (pol) {
           console.log(`[cron] Matched politician: ${pol.name}`);
           return pol.id as string;
@@ -393,6 +413,7 @@ async function fetchPlaylist(url: string): Promise<HlsPlaylist | null> {
 async function resolveMediaPlaylist(url: string): Promise<string> {
   try {
     const r = await fetch(url, { headers: HLS_HEADERS });
+    if (!r.ok) return url;
     const text = await r.text();
     const base = url.substring(0, url.lastIndexOf("/") + 1);
     if (!text.includes("#EXT-X-STREAM-INF")) return url;
