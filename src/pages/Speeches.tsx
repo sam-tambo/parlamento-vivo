@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { Search, SlidersHorizontal } from "lucide-react";
 import { SpeechCard } from "@/components/SpeechCard";
-import { useSpeeches } from "@/lib/queries";
+import { useSpeeches, useRefreshPoliticianStats } from "@/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PARTIES } from "@/lib/mock-data";
@@ -13,6 +13,10 @@ export default function Speeches() {
   const [selectedParty, setSelectedParty] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [search, setSearch] = useState("");
+
+  // Accumulate politician stats from transcript_events every time this page loads.
+  // The DB trigger keeps stats live going forward; this RPC backfills any gaps.
+  useRefreshPoliticianStats();
 
   const { data: speeches = [], isLoading } = useSpeeches(selectedParty);
 
