@@ -1,0 +1,1 @@
+ALTER TABLE public.politicians ADD CONSTRAINT politicians_name_key UNIQUE (name);
