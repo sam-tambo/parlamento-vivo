@@ -225,24 +225,11 @@ async function fetchPage(url: string): Promise<string | null> {
   } catch { return null; }
 }
 
-/** Full 5-stage ARTV HLS URL discovery */
-async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
-  // A. Use cached URL if still valid
-  if (stored?.includes(".m3u8")) {
-    const ok = await probeHls(stored);
-    if (ok) return stored;
-    console.warn("[cron] Cached HLS URL expired, re-discovering…");
-  }
-
-  // B. IPTV playlist (community-maintained, most reliable external source)
-  const iptvUrl = await discoverFromIptvPlaylist();
-  if (iptvUrl) return iptvUrl;
-
-  // B2. JSON API probes (fast, no HTML parsing needed)
-  const apiUrl = await discoverFromApi();
-  if (apiUrl) return apiUrl;
-
-  // C+D. Scrape HTML of the two main pages
+/**
+ * Stage C+D: scrape canal.parlamento.pt HTML for an embedded .m3u8 URL.
+ * Checks __NEXT_DATA__, full HTML regex, and linked player JS bundles.
+ */
+async function discoverFromHtml(): Promise<string | null> {
   const pagesToScrape = [
     "https://canal.parlamento.pt/plenario",
     "https://canal.parlamento.pt",
@@ -252,38 +239,38 @@ async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
     const html = await fetchPage(pageUrl);
     if (!html) continue;
 
-    // C. Next.js __NEXT_DATA__ (fast parse, reliable if Next.js is used)
     const nextUrl = extractFromNextData(html);
     if (nextUrl) {
       const ok = await probeHls(nextUrl);
       if (ok) { console.log(`[cron] Next.js data hit: ${nextUrl}`); return nextUrl; }
     }
 
-    // D. Full HTML regex scan
     const htmlUrl = extractFromHtml(html, pageUrl);
     if (htmlUrl) {
       const ok = await probeHls(htmlUrl);
       if (ok) { console.log(`[cron] HTML scan hit: ${htmlUrl}`); return htmlUrl; }
     }
 
-    // D2. Also scan any inline <script src="..."> chunks that might embed the player
     const scriptSrcs = [...html.matchAll(/src=["'](https?:[^"']+\.js[^"']*)/gi)]
       .map(m => m[1])
       .filter(s => /player|video|stream|hls/i.test(s))
-      .slice(0, 3); // limit to avoid too many requests
+      .slice(0, 3);
 
-    for (const scriptSrc of scriptSrcs) {
-      const js = await fetchPage(scriptSrc);
+    for (const src of scriptSrcs) {
+      const js = await fetchPage(src);
       if (!js) continue;
-      const jsUrl = extractFromHtml(js, scriptSrc);
+      const jsUrl = extractFromHtml(js, src);
       if (jsUrl) {
         const ok = await probeHls(jsUrl);
         if (ok) { console.log(`[cron] JS bundle hit: ${jsUrl}`); return jsUrl; }
       }
     }
   }
+  return null;
+}
 
-  // E. Parallel probe of all known CDN candidates (last resort)
+/** Stage E: probe all known CDN candidates in parallel — typically fastest. */
+async function discoverFromCdnCandidates(): Promise<string | null> {
   console.log("[cron] Probing CDN candidates in parallel…");
   const results = await Promise.all(HLS_CANDIDATES.map(u => probeHls(u)));
   for (let i = 0; i < results.length; i++) {
@@ -291,6 +278,106 @@ async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
       console.log(`[cron] CDN candidate hit: ${HLS_CANDIDATES[i]}`);
       return HLS_CANDIDATES[i];
     }
+  }
+  return null;
+}
+
+/**
+ * Full ARTV HLS URL discovery.
+ *
+ * Stage A: validate cached URL (fast, ~1–8 s).
+ * Stages B–E: run ALL discovery methods in parallel via Promise.race so the
+ * fastest winner (usually the CDN probe at ~8 s) terminates the race, instead
+ * of waiting for slower sequential stages that can total > 120 s.
+ */
+async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
+  // A. Use cached URL if still valid — avoids all network discovery on hot path
+  if (stored?.includes(".m3u8")) {
+    const ok = await probeHls(stored);
+    if (ok) return stored;
+    console.warn("[cron] Cached HLS URL expired, re-discovering…");
+  }
+
+  // B–E. "First non-null wins" across all discovery strategies run in parallel.
+  // CDN parallel probe (stage E) typically resolves in ~8 s when the stream
+  // is live — far faster than the sequential HTML-scraping path (up to 90 s).
+  //
+  // We use Promise.any semantics: each strategy rejects when it returns null
+  // so Promise.any naturally skips null results and resolves on the first
+  // actual URL found. If everything fails, AggregateError → return null.
+  const winner = await Promise.any(
+    [discoverFromCdnCandidates, discoverFromIptvPlaylist, discoverFromApi, discoverFromHtml]
+      .map(fn => fn().then(url => {
+        if (url) return url;
+        return Promise.reject(new Error("no url"));
+      }))
+  ).catch(() => null);
+
+  return winner;
+}
+
+// ─── Speaker identification ───────────────────────────────────────────────────
+
+type SupabaseClient = ReturnType<typeof createClient>;
+
+/**
+ * Try to discover who is currently speaking by probing canal.parlamento.pt
+ * API endpoints that may expose live session / agenda data.
+ *
+ * Returns the matching politician's UUID (from our DB), or null.
+ * This is a best-effort hint: transcribe will fall back to text extraction
+ * if we return null here.
+ */
+async function fetchCurrentSpeaker(
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  // Endpoints that may expose current speaker info
+  const endpoints = [
+    "https://canal.parlamento.pt/api/lives",
+    "https://canal.parlamento.pt/api/lives/plenario",
+    "https://canal.parlamento.pt/api/player/live",
+    "https://canal.parlamento.pt/api/sessions/current",
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const r = await fetch(ep, {
+        headers: { ...BROWSER_HEADERS, Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) continue;
+      const ct = r.headers.get("content-type") ?? "";
+      if (!ct.includes("json")) continue;
+
+      const data = await r.json();
+      const json = JSON.stringify(data);
+
+      // Extract value of any speaker-ish field
+      const m = json.match(
+        /"(?:speaker|orador|interveniente|deputado|author|nome|name)"\s*:\s*"([^"]{3,})"/i,
+      );
+      if (!m) continue;
+
+      const speakerName = m[1].trim();
+      if (!speakerName) continue;
+
+      console.log(`[cron] API speaker hint: "${speakerName}" (from ${ep})`);
+
+      // Fuzzy match against politicians (name / full_name)
+      const words = speakerName.split(/\s+/).filter((w: string) => w.length > 3);
+      for (const word of words) {
+        const { data: pol } = await supabase
+          .from("politicians")
+          .select("id, name")
+          .or(`name.ilike.%${word}%,full_name.ilike.%${word}%`)
+          .limit(1)
+          .maybeSingle();
+        if (pol) {
+          console.log(`[cron] Matched politician: ${pol.name}`);
+          return pol.id as string;
+        }
+      }
+    } catch { /* try next endpoint */ }
   }
 
   return null;
@@ -326,6 +413,7 @@ async function fetchPlaylist(url: string): Promise<HlsPlaylist | null> {
 async function resolveMediaPlaylist(url: string): Promise<string> {
   try {
     const r = await fetch(url, { headers: HLS_HEADERS });
+    if (!r.ok) return url;
     const text = await r.text();
     const base = url.substring(0, url.lastIndexOf("/") + 1);
     if (!text.includes("#EXT-X-STREAM-INF")) return url;
@@ -458,15 +546,28 @@ Deno.serve(async (req: Request) => {
 
   console.log(`[cron] ${newSegments.length} new segments to transcribe`);
 
+  // ── Identify current speaker (best-effort, doesn't block if null) ─────────
+  const currentSpeakerId = await fetchCurrentSpeaker(supabase);
+  if (currentSpeakerId) {
+    console.log(`[cron] Current speaker hint: ${currentSpeakerId}`);
+  }
+
   // ── Send to transcribe in ~30s batches ────────────────────────────────────
   let totalWords = 0, totalFillers = 0, chunksOk = 0;
 
   for (let i = 0; i < newSegments.length; i += SEGMENTS_PER_CHUNK) {
     const batch = newSegments.slice(i, i + SEGMENTS_PER_CHUNK);
     try {
+      const transcribeHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${SERVICE_KEY}`,
+        "x-session-id": session.id,
+      };
+      if (currentSpeakerId) transcribeHeaders["x-politician-id"] = currentSpeakerId;
+
       const resp = await fetch(`${FUNCTIONS_URL}/transcribe`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SERVICE_KEY}`, "x-session-id": session.id },
+        headers: transcribeHeaders,
         body: JSON.stringify({ segment_urls: batch, m3u8_url: mediaUrl }),
         signal: AbortSignal.timeout(120_000),
       });
