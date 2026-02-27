@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { Trophy, Clock, MessageSquare, Users, MicOff } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -99,6 +99,7 @@ export default function Politicians() {
                   className="flex flex-col items-center flex-1"
                 >
                   <Avatar className="h-12 w-12 mb-1 border-2" style={{ borderColor: PARTY_COLORS[p.party] }}>
+                    {p.photo_url && <AvatarImage src={p.photo_url} alt={p.name} />}
                     <AvatarFallback className="bg-secondary text-xs font-bold">
                       {p.name.split(" ").map(n => n[0]).join("").slice(0, 2)}
                     </AvatarFallback>
@@ -198,6 +199,7 @@ export default function Politicians() {
               >
                 <div className="flex items-center gap-3 mb-3">
                   <Avatar className="h-10 w-10 border-2 shrink-0" style={{ borderColor: color }}>
+                    {p.photo_url && <AvatarImage src={p.photo_url} alt={p.name} />}
                     <AvatarFallback className="bg-secondary text-xs font-bold">{initials}</AvatarFallback>
                   </Avatar>
                   <div className="flex-1 min-w-0">

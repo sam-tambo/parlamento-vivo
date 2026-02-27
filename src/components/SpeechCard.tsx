@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { Clock, MessageSquare } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Progress } from "@/components/ui/progress";
 import { PARTY_COLORS } from "@/lib/mock-data";
 
@@ -50,6 +50,7 @@ export function SpeechCard({
       <div className="p-4">
         <div className="flex items-center gap-3 mb-3">
           <Avatar className="h-10 w-10 border-2" style={{ borderColor: PARTY_COLORS[politician.party] }}>
+            {politician.photo_url && <AvatarImage src={politician.photo_url} alt={politician.name} />}
             <AvatarFallback className="bg-secondary text-xs font-bold">{initials}</AvatarFallback>
           </Avatar>
           <div className="flex-1 min-w-0">
