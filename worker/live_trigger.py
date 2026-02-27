@@ -33,7 +33,20 @@ from datetime import datetime, timezone, timedelta
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+# ARTV page (used by yt-dlp / streamlink as the entry point)
 ARTV_URL      = "https://canal.parlamento.pt/plenario"
+ARTV_LINEAR   = "https://canal.parlamento.pt"   # 24/7 linear channel
+
+# Known ARTV CDN HLS URL candidates — tried in order before falling back to
+# yt-dlp / page scraping.  Keep in sync with plenario-cron/index.ts.
+ARTV_HLS_CANDIDATES = [
+    "https://livepd3.parlamento.pt/artv/live.m3u8",
+    "https://livepd3.parlamento.pt/plenario/live.m3u8",
+    "https://streaming.rtp.pt/liverepeater/smil:artv.smil/playlist.m3u8",
+    "https://cdn-rtve.akamaized.net/artv/live.m3u8",
+    "https://livepd3.parlamento.pt/canal/live.m3u8",
+    "https://streaming.parlamento.pt/artv/live.m3u8",
+]
 
 # Lovable Cloud project URL (not secret — same value as VITE_SUPABASE_URL in .env).
 # Override with LOVABLE_URL env var if you ever migrate to a different project.
@@ -126,51 +139,86 @@ def _hls_from_html(page_url: str) -> str | None:
     return None
 
 
+def _probe_hls(url: str, timeout: int = 8) -> bool:
+    """Return True if url responds with a valid HLS playlist (#EXTM3U)."""
+    import re as _re
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            chunk = r.read(256).decode("utf-8", errors="replace")
+        return chunk.strip().startswith("#EXTM3U")
+    except Exception:
+        return False
+
+
 def find_hls_url() -> str | None:
     """
-    Extract the live HLS stream URL from the ARTV Plenário page.
+    Resolve the live ARTV HLS stream URL.
 
     Tries (in order):
-      1. yt-dlp  — handles JS-rendered pages and many live stream sites
-      2. streamlink — fast for known live stream sites
-      3. Direct HTML fetch — parses page source for embedded m3u8 URLs
+      1. Known CDN URL candidates (fast, ~1–2 s per probe, tried in parallel)
+      2. yt-dlp on canal.parlamento.pt/plenario and the linear channel
+      3. streamlink
+      4. HTML scrape of both ARTV pages for embedded .m3u8 strings
     """
-    for fmt in ["best[protocol=m3u8_native]", "best[protocol=m3u8]", "best"]:
+    import re
+
+    # 1. Try known CDN candidates directly (fastest path, no external tools)
+    print("[trigger] Probing known ARTV CDN URLs…", file=sys.stderr)
+    for url in ARTV_HLS_CANDIDATES:
+        if _probe_hls(url):
+            print(f"[trigger] ✓ CDN hit: {url}", file=sys.stderr)
+            return url
+
+    # 2. yt-dlp on the plenario page and the linear channel
+    for page_url in [ARTV_URL, ARTV_LINEAR]:
+        for fmt in ["best[protocol=m3u8_native]", "best[protocol=m3u8]", "best"]:
+            try:
+                r = subprocess.run(
+                    ["yt-dlp", "--get-url", "-f", fmt, "--no-warnings", page_url],
+                    capture_output=True, text=True, timeout=60,
+                )
+                for line in r.stdout.strip().splitlines():
+                    line = line.strip()
+                    if line.startswith("http") and (".m3u8" in line or "stream" in line.lower()):
+                        print(f"[trigger] ✓ yt-dlp found: {line[:80]}", file=sys.stderr)
+                        return line
+            except FileNotFoundError:
+                print("[trigger] yt-dlp not found — install with: pip install yt-dlp", file=sys.stderr)
+                break
+            except subprocess.TimeoutExpired:
+                print(f"[trigger] yt-dlp timed out on {page_url}", file=sys.stderr)
+                break
+            except Exception as e:
+                print(f"[trigger] yt-dlp error: {e}", file=sys.stderr)
+        else:
+            continue
+        break   # yt-dlp not installed — skip both pages
+
+    # 3. streamlink
+    for page_url in [ARTV_URL, ARTV_LINEAR]:
         try:
             r = subprocess.run(
-                ["yt-dlp", "--get-url", "-f", fmt, "--no-warnings", ARTV_URL],
-                capture_output=True, text=True, timeout=90,
+                ["streamlink", "--stream-url", page_url, "best"],
+                capture_output=True, text=True, timeout=30,
             )
-            for line in r.stdout.strip().splitlines():
-                line = line.strip()
-                if line.startswith("http") and (".m3u8" in line or "stream" in line.lower()):
-                    return line
+            url = r.stdout.strip()
+            if url.startswith("http"):
+                print(f"[trigger] ✓ streamlink: {url[:80]}", file=sys.stderr)
+                return url
         except FileNotFoundError:
-            print("[trigger] yt-dlp not found — install with: pip install yt-dlp", file=sys.stderr)
-            break   # don't keep looping if tool is missing
-        except subprocess.TimeoutExpired:
-            print("[trigger] yt-dlp timed out", file=sys.stderr)
             break
         except Exception as e:
-            print(f"[trigger] yt-dlp error: {e}", file=sys.stderr)
+            print(f"[trigger] streamlink error: {e}", file=sys.stderr)
 
-    # Fallback: try streamlink
-    try:
-        r = subprocess.run(
-            ["streamlink", "--stream-url", ARTV_URL, "best"],
-            capture_output=True, text=True, timeout=60,
-        )
-        url = r.stdout.strip()
-        if url.startswith("http"):
+    # 4. HTML scrape of both pages
+    for page_url in [ARTV_URL, ARTV_LINEAR]:
+        url = _hls_from_html(page_url)
+        if url:
+            print(f"[trigger] ✓ HTML scrape found: {url[:80]}", file=sys.stderr)
             return url
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"[trigger] streamlink error: {e}", file=sys.stderr)
 
-    # Last resort: fetch page HTML and look for embedded m3u8 URLs
-    print("[trigger] Trying direct HTML fetch for HLS URL…", file=sys.stderr)
-    return _hls_from_html(ARTV_URL)
+    return None
 
 
 # ─── Session management ───────────────────────────────────────────────────────
@@ -289,6 +337,29 @@ if __name__ == "__main__":
     if not session_id:
         sys.exit(1)
 
-    # 3. Trigger transcription chunk
-    ok = trigger_transcription(session_id, hls_url)
-    sys.exit(0 if ok else 1)
+    # 3. Delegate everything else to plenario-cron edge function.
+    #    It handles segment cursor tracking, transcription, and DB updates.
+    fn_url = f"{SUPABASE_URL}/functions/v1/plenario-cron"
+    # Pass the discovered HLS URL so the edge function can skip its own discovery.
+    # The edge function will store it in sessions.artv_stream_url if it changed.
+    body = json.dumps({"hls_url": hls_url}).encode()
+    req  = urllib.request.Request(fn_url, data=body, method="POST", headers=_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            result = json.loads(r.read())
+        segs    = result.get("new_segments", 0)
+        words   = result.get("total_words", 0)
+        fillers = result.get("total_fillers", 0)
+        ratio   = round(fillers / max(words, 1) * 100, 1)
+        print(f"[trigger] OK — {segs} new segments, {words} words, {fillers} fillers ({ratio}%)")
+        sys.exit(0)
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:300].decode("utf-8", errors="replace")
+        if e.code == 503:
+            print("[trigger] HF model loading (503) — will succeed next run", file=sys.stderr)
+            sys.exit(0)
+        print(f"[trigger] plenario-cron HTTP {e.code}: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"[trigger] plenario-cron call failed: {e}", file=sys.stderr)
+        sys.exit(1)
