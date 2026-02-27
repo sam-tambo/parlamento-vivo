@@ -2,166 +2,121 @@
 """
 Parlamento Vivo — AI Speech Analysis Worker
 ============================================
-Connects to the ARTV Plenário live stream OR processes archive footage,
-transcribes audio with OpenAI Whisper, detects filler words, and posts
-results to Supabase for real-time display.
+Captures audio from the ARTV Plenário stream, transcribes with Whisper,
+optionally diarizes speakers with pyannote.audio, detects Portuguese filler
+words, and pushes everything to Supabase in real-time.
 
-Modes:
-  python ai_worker.py live         # Live stream from canal.parlamento.pt/plenario
-  python ai_worker.py archive 2025 # Process 2025 archive sessions
-  python ai_worker.py file <path>  # Process a local video/audio file
+MODES:
+  python ai_worker.py live
+      Stream canal.parlamento.pt/plenario live, 30-second chunks.
 
-Requirements: see requirements.txt
+  python ai_worker.py recent [N]
+      Download and process the N most recent sessions from the ARTV Plenário
+      archive (default N=20). Uses Playwright to discover URLs.
+
+  python ai_worker.py file <path>
+      Process a single local audio/video file.
+
+REQUIRED ENV VARS:
+  SUPABASE_URL          https://xxxxx.supabase.co
+  SUPABASE_SERVICE_KEY  service_role key (not anon!)
+
+OPTIONAL ENV VARS:
+  WHISPER_MODEL    base | small | medium | large-v3  (default: medium)
+  CHUNK_SECONDS    seconds per live chunk            (default: 30)
+  HF_TOKEN         HuggingFace token — enables speaker diarization
+                   (requires accepting model licenses, see diarization.py)
+  VOICE_THRESHOLD  cosine distance for speaker match (default: 0.25)
 """
 
-import os
-import sys
-import re
+from __future__ import annotations
+
 import json
-import time
+import os
+import re
 import subprocess
+import sys
 import tempfile
-from datetime import datetime, date
+import time
+import urllib.error
+import urllib.request
+from datetime import date, datetime
 from pathlib import Path
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+# Sibling modules
+sys.path.insert(0, str(Path(__file__).parent))
+from diarization import VoiceProfileDB, Diarizer, align_whisper_to_diarization, PYANNOTE_AVAILABLE
+
+# ─── Config ───────────────────────────────────────────────────────────────────
 
 SUPABASE_URL         = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-ARTV_LIVE_URL        = "https://canal.parlamento.pt/plenario"
-WHISPER_MODEL        = os.environ.get("WHISPER_MODEL", "medium")  # base / small / medium / large
+HF_TOKEN             = os.environ.get("HF_TOKEN", "")
+WHISPER_MODEL        = os.environ.get("WHISPER_MODEL", "medium")
 CHUNK_SECONDS        = int(os.environ.get("CHUNK_SECONDS", "30"))
+ARTV_PLENARIO_URL    = "https://canal.parlamento.pt/plenario"
 
-# Portuguese parliamentary filler words (must match src/lib/filler-words.ts)
-FILLER_CATALOG = [
-    # hesitation
-    "digamos", "quer dizer", "bem", "ora", "pois", "ah", "eh", "hm",
-    # connectors
-    "portanto", "ou seja", "de facto", "na verdade", "assim", "então", "depois",
-    # fillers
-    "pronto", "basicamente", "efetivamente", "tipo", "ok", "olhe", "enfim",
-    "exatamente", "claro", "obviamente", "naturalmente", "certamente",
-    # stallers
+# Portuguese parliamentary filler words — must match src/lib/filler-words.ts
+FILLER_CATALOG = sorted([
     "como direi", "de certa forma", "de alguma maneira", "por assim dizer",
     "de certa maneira", "de algum modo",
-]
-# Sort longest first to match multi-word phrases before single words
-FILLER_CATALOG.sort(key=len, reverse=True)
+    "portanto", "ou seja", "de facto", "na verdade",
+    "quer dizer", "digamos", "basicamente", "efetivamente",
+    "pronto", "enfim", "olhe", "tipo", "ok", "bem", "ora", "pois",
+    "assim", "então", "depois", "exatamente", "claro",
+    "obviamente", "naturalmente", "certamente", "ah", "eh", "hm",
+], key=len, reverse=True)  # longest first for greedy matching
 
 
-# ─── Supabase client (minimal HTTP) ──────────────────────────────────────────
+# ─── Supabase minimal REST client ────────────────────────────────────────────
 
-import urllib.request
-import urllib.error
-
-def supabase_request(method: str, table: str, data: dict | None = None,
-                     query: str = "") -> dict:
-    """Minimal Supabase REST API caller — no extra dependencies needed."""
-    url = f"{SUPABASE_URL}/rest/v1/{table}{query}"
-    headers = {
+def _sb(method: str, table: str, data: dict | None = None, qs: str = "") -> list | dict:
+    url  = f"{SUPABASE_URL}/rest/v1/{table}{qs}"
+    hdrs = {
         "apikey":        SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
         "Content-Type":  "application/json",
         "Prefer":        "return=representation",
     }
     body = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    req  = urllib.request.Request(url, data=body, headers=hdrs, method=method)
     try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        print(f"[supabase] {method} {table} → HTTP {e.code}: {e.read().decode()}")
-        return {}
+        print(f"[supabase] {method} {table}: HTTP {e.code} — {e.read().decode()[:200]}")
+        return []
 
 
-# ─── Filler detection ─────────────────────────────────────────────────────────
+# ─── Filler detection ────────────────────────────────────────────────────────
 
 def detect_fillers(text: str) -> tuple[int, dict[str, int]]:
-    """Return (total_count, {word: count}) for all filler words in text."""
     remaining = text.lower()
     found: dict[str, int] = {}
     for word in FILLER_CATALOG:
-        pattern = re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
-        matches = pattern.findall(remaining)
-        if matches:
-            found[word] = len(matches)
-            remaining = pattern.sub(" " * len(word), remaining)
+        pat = re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
+        hits = pat.findall(remaining)
+        if hits:
+            found[word] = len(hits)
+            remaining = pat.sub(" " * len(word), remaining)
     return sum(found.values()), found
 
 
-# ─── Audio capture (live) ────────────────────────────────────────────────────
+# ─── Session management ───────────────────────────────────────────────────────
 
-def get_hls_url(page_url: str) -> str:
-    """Extract HLS stream URL from an ARTV page using streamlink."""
-    print(f"[worker] Extracting HLS URL from {page_url} …")
-    try:
-        result = subprocess.run(
-            ["streamlink", "--stream-url", page_url, "best"],
-            capture_output=True, text=True, timeout=45,
-        )
-        url = result.stdout.strip()
-        if url and url.startswith("http"):
-            print(f"[worker] HLS URL: {url[:80]}…")
-            return url
-    except FileNotFoundError:
-        pass  # streamlink not installed; fall back to yt-dlp
-
-    # Fallback: yt-dlp
-    result = subprocess.run(
-        ["yt-dlp", "-f", "best", "--get-url", page_url],
-        capture_output=True, text=True, timeout=45,
-    )
-    url = result.stdout.strip()
-    if url:
-        return url
-
-    raise RuntimeError(
-        "Could not extract stream URL. Install streamlink or yt-dlp:\n"
-        "  pip install streamlink yt-dlp"
-    )
-
-
-def capture_audio_chunk(stream_url: str, output_path: str, duration: int = 30):
-    """Capture `duration` seconds of audio from an HLS stream via ffmpeg."""
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-i", stream_url,
-            "-t", str(duration),
-            "-vn",          # no video
-            "-ar", "16000", # 16 kHz mono — optimal for Whisper
-            "-ac", "1",
-            "-f", "wav",
-            output_path,
-        ],
-        capture_output=True, check=True,
-    )
-
-
-# ─── Whisper transcription ───────────────────────────────────────────────────
-
-def transcribe(audio_path: str, model) -> str:
-    """Transcribe an audio file with Whisper and return the text."""
-    result = model.transcribe(audio_path, language="pt", task="transcribe")
-    return result["text"].strip()
-
-
-# ─── Supabase helpers ─────────────────────────────────────────────────────────
-
-def get_or_create_session(session_date: str | None = None) -> str:
+def get_or_create_session(session_date: str | None = None,
+                           source_url: str | None  = None) -> str:
     today = session_date or date.today().isoformat()
-    rows = supabase_request(
-        "GET", "sessions",
-        query=f"?date=eq.{today}&status=eq.live&select=id&limit=1",
-    )
-    if rows:
+    rows  = _sb("GET", "sessions",
+                qs=f"?date=eq.{today}&status=eq.live&select=id&limit=1")
+    if isinstance(rows, list) and rows:
         return rows[0]["id"]
 
-    result = supabase_request("POST", "sessions", {
-        "date": today,
-        "status": "live",
-        "artv_stream_url": ARTV_LIVE_URL,
-        "start_time": datetime.now().strftime("%H:%M:%S"),
+    result = _sb("POST", "sessions", {
+        "date":              today,
+        "status":            "live",
+        "artv_stream_url":   source_url or ARTV_PLENARIO_URL,
+        "start_time":        datetime.now().strftime("%H:%M:%S"),
         "transcript_status": "processing",
     })
     if isinstance(result, list) and result:
@@ -169,279 +124,403 @@ def get_or_create_session(session_date: str | None = None) -> str:
     raise RuntimeError("Could not create session in Supabase")
 
 
+def close_session(session_id: str, total_filler: int, total_minutes: float):
+    _sb("PATCH", "sessions", {
+        "status":              "completed",
+        "end_time":            datetime.now().strftime("%H:%M:%S"),
+        "transcript_status":   "done",
+        "total_filler_count":  total_filler,
+        "total_speaking_minutes": round(total_minutes, 1),
+    }, qs=f"?id=eq.{session_id}")
+
+
+# ─── Supabase writes ──────────────────────────────────────────────────────────
+
 def post_event(session_id: str, politician_id: str | None,
                text: str, filler_count: int, filler_words: dict,
-               start_seconds: float, duration: float):
-    supabase_request("POST", "transcript_events", {
-        "session_id":       session_id,
-        "politician_id":    politician_id,
-        "text_segment":     text,
-        "filler_count":     filler_count,
-        "total_words":      len(text.split()),
+               start_seconds: float, duration: float,
+               confidence: float = 0.0):
+    _sb("POST", "transcript_events", {
+        "session_id":        session_id,
+        "politician_id":     politician_id,
+        "text_segment":      text,
+        "filler_count":      filler_count,
+        "total_words":       len(text.split()),
         "filler_words_found": filler_words,
-        "start_seconds":    start_seconds,
-        "duration_seconds": duration,
+        "start_seconds":     round(start_seconds, 2),
+        "duration_seconds":  round(duration, 2),
     })
 
 
-def update_politician_stats(politician_id: str, filler_count: int,
-                             duration_seconds: int, word_count: int):
-    rows = supabase_request(
-        "GET", "politicians",
-        query=f"?id=eq.{politician_id}&select=*&limit=1",
-    )
-    if not rows:
+def upsert_speech(session_id: str, politician_id: str,
+                  words: int, fillers: int, duration_s: int,
+                  excerpt: str, filler_words: dict):
+    """Store one complete speech turn in the speeches table."""
+    ratio = fillers / max(words, 1)
+    _sb("POST", "speeches", {
+        "session_id":               session_id,
+        "politician_id":            politician_id,
+        "speaking_duration_seconds": duration_s,
+        "filler_word_count":        fillers,
+        "total_word_count":         words,
+        "filler_ratio":             round(ratio, 4),
+        "transcript_excerpt":       excerpt[:500],
+        "filler_words_detail":      filler_words,
+    })
+    # Bump politician aggregate stats
+    rows = _sb("GET", "politicians",
+               qs=f"?id=eq.{politician_id}&select=*&limit=1")
+    if not (isinstance(rows, list) and rows):
         return
     p = rows[0]
     new_speeches = p["total_speeches"] + 1
-    new_fillers  = p["total_filler_count"] + filler_count
-    new_seconds  = p["total_speaking_seconds"] + duration_seconds
-    total_words  = max(word_count, 1)
-    new_ratio    = new_fillers / (new_speeches * max(total_words, 1))
-
-    supabase_request("PATCH", "politicians", {
-        "total_speeches":       new_speeches,
-        "total_filler_count":   new_fillers,
+    new_fillers  = p["total_filler_count"] + fillers
+    new_seconds  = p["total_speaking_seconds"] + duration_s
+    # Running average of filler ratio across all speeches
+    prev_ratio   = p["average_filler_ratio"] or 0.0
+    new_ratio    = (prev_ratio * (new_speeches - 1) + ratio) / new_speeches
+    _sb("PATCH", "politicians", {
+        "total_speeches":         new_speeches,
+        "total_filler_count":     new_fillers,
         "total_speaking_seconds": new_seconds,
-        "average_filler_ratio": min(new_ratio, 1.0),
-    }, query=f"?id=eq.{politician_id}")
+        "average_filler_ratio":   round(new_ratio, 5),
+    }, qs=f"?id=eq.{politician_id}")
 
 
-# ─── Mode: LIVE ──────────────────────────────────────────────────────────────
+# ─── Audio utilities ─────────────────────────────────────────────────────────
+
+def get_hls_url(page_url: str) -> str:
+    """Extract HLS .m3u8 URL using streamlink, falling back to yt-dlp."""
+    for tool, args in [
+        ("streamlink", ["streamlink", "--stream-url", page_url, "best"]),
+        ("yt-dlp",     ["yt-dlp", "-f", "best", "--get-url", page_url]),
+    ]:
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=45)
+            url = r.stdout.strip()
+            if url.startswith("http"):
+                print(f"[worker] HLS via {tool}: {url[:80]}…")
+                return url
+        except FileNotFoundError:
+            continue
+    raise RuntimeError("Cannot extract HLS URL — install streamlink or yt-dlp")
+
+
+def capture_chunk(stream_url: str, out: str, duration: int = 30):
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", stream_url,
+         "-t", str(duration),
+         "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", out],
+        capture_output=True, check=True,
+    )
+
+
+def download_audio(video_url: str, out: str):
+    """Download audio from any yt-dlp–supported URL as 16kHz mono WAV."""
+    subprocess.run(
+        ["yt-dlp", "-x",
+         "--audio-format", "wav",
+         "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
+         "-o", out,
+         video_url],
+        check=True,
+    )
+    # yt-dlp sometimes changes the extension
+    if not Path(out).exists():
+        candidates = list(Path(out).parent.glob(Path(out).stem + ".*"))
+        if candidates:
+            return str(candidates[0])
+        raise FileNotFoundError(f"Download output not found near {out}")
+    return out
+
+
+def to_wav16k(src: str, out: str):
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", src,
+         "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", out],
+        capture_output=True, check=True,
+    )
+
+
+# ─── Print helper ─────────────────────────────────────────────────────────────
+
+def _log_chunk(idx: int, words: int, fillers: int, filler_words: dict,
+               politician_name: str | None = None):
+    ratio = fillers / max(words, 1) * 100
+    who   = f" [{politician_name}]" if politician_name else ""
+    print(f"[worker] #{idx:04d}{who}  {words:4d} words  {fillers:3d} fillers ({ratio:.1f}%)")
+    if filler_words:
+        top = sorted(filler_words.items(), key=lambda x: -x[1])[:4]
+        print(f"          top: {', '.join(f'{w}×{c}' for w, c in top)}")
+
+
+# ─── Mode: LIVE ───────────────────────────────────────────────────────────────
 
 def run_live():
-    import whisper  # type: ignore
-    print(f"[worker] Loading Whisper model '{WHISPER_MODEL}' …")
+    import whisper
+
+    print(f"[worker] Loading Whisper '{WHISPER_MODEL}' …")
     model = whisper.load_model(WHISPER_MODEL)
 
-    stream_url = get_hls_url(ARTV_LIVE_URL)
-    session_id = get_or_create_session()
-    print(f"[worker] Session ID: {session_id}")
-    print(f"[worker] Processing {CHUNK_SECONDS}s chunks. Press Ctrl+C to stop.\n")
+    # Optional diarizer
+    diarizer: Diarizer | None = None
+    profiles = VoiceProfileDB()
+    if HF_TOKEN and PYANNOTE_AVAILABLE and len(profiles) > 0:
+        print(f"[worker] Diarization enabled ({len(profiles)} voice profiles loaded)")
+        diarizer = Diarizer(HF_TOKEN, profiles)
+    elif HF_TOKEN and not PYANNOTE_AVAILABLE:
+        print("[worker] HF_TOKEN set but pyannote.audio not installed — skipping diarization")
+    else:
+        print("[worker] No voice profiles — speaker attribution disabled (see build_profiles.py)")
 
-    chunk_idx    = 0
+    stream_url    = get_hls_url(ARTV_PLENARIO_URL)
+    session_id    = get_or_create_session(source_url=ARTV_PLENARIO_URL)
     session_start = time.time()
+    chunk_idx     = 0
+    session_total_fillers = 0
+    print(f"[worker] Session {session_id} — live. Ctrl+C to stop.\n")
 
     while True:
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                audio_path = f.name
+                wav = f.name
 
             print(f"[worker] Chunk {chunk_idx:04d} — capturing {CHUNK_SECONDS}s …", end="", flush=True)
-            capture_audio_chunk(stream_url, audio_path, CHUNK_SECONDS)
-
+            capture_chunk(stream_url, wav, CHUNK_SECONDS)
             print(" transcribing …", end="", flush=True)
-            text = transcribe(audio_path, model)
-            os.unlink(audio_path)
+
+            result = model.transcribe(wav, language="pt", task="transcribe", verbose=False)
+            text   = result["text"].strip()
 
             if not text:
                 print(" (empty)")
+                os.unlink(wav)
                 chunk_idx += 1
                 continue
 
             filler_count, filler_words = detect_fillers(text)
-            words       = len(text.split())
-            ratio       = filler_count / max(words, 1) * 100
-            elapsed     = time.time() - session_start
+            elapsed = time.time() - session_start
+            print()
+            _log_chunk(chunk_idx, len(text.split()), filler_count, filler_words)
 
-            print(f" {words} words · {filler_count} fillers ({ratio:.1f}%)")
-            if filler_count > 0:
-                top = sorted(filler_words.items(), key=lambda x: -x[1])[:3]
-                print(f"          top: {', '.join(f'{w}×{c}' for w,c in top)}")
+            politician_id: str | None = None
+            if diarizer:
+                try:
+                    segs = diarizer.diarize(wav)
+                    # Use the majority speaker for this chunk
+                    by_dur: dict[str | None, float] = {}
+                    for s in segs:
+                        pid = s["politician_id"]
+                        by_dur[pid] = by_dur.get(pid, 0.0) + (s["end"] - s["start"])
+                    politician_id = max(by_dur, key=lambda k: by_dur[k])
+                except Exception as e:
+                    print(f"[worker] diarization error: {e}")
 
-            post_event(session_id, None, text, filler_count, filler_words, elapsed, CHUNK_SECONDS)
+            post_event(session_id, politician_id, text,
+                       filler_count, filler_words, elapsed, CHUNK_SECONDS)
+            session_total_fillers += filler_count
+
+            os.unlink(wav)
             chunk_idx += 1
 
         except KeyboardInterrupt:
             print("\n[worker] Stopping …")
-            supabase_request("PATCH", "sessions", {
-                "status": "completed",
-                "end_time": datetime.now().strftime("%H:%M:%S"),
-                "transcript_status": "done",
-            }, query=f"?id=eq.{session_id}")
+            close_session(session_id, session_total_fillers,
+                          (time.time() - session_start) / 60)
             break
         except Exception as e:
             print(f"\n[worker] Error: {e}")
             time.sleep(5)
 
 
-# ─── Mode: ARCHIVE ────────────────────────────────────────────────────────────
+# ─── Mode: RECENT (N latest sessions) ────────────────────────────────────────
 
-def run_archive(year: int):
-    """
-    Process archived sessions from canal.parlamento.pt for a given year.
+def run_recent(limit: int = 20):
+    """Download and process the N most recent Plenário sessions."""
+    import whisper
+    from scraper import get_latest_session_urls
 
-    The ARTV archive catalogue is at:
-      https://canal.parlamento.pt/arquivo?year=YYYY
-
-    Each session URL follows a pattern like:
-      https://canal.parlamento.pt/vod/{session-id}
-
-    We use yt-dlp to:
-      1. List all available session URLs for the year
-      2. Download audio for each
-      3. Transcribe and store results
-    """
-    import whisper  # type: ignore
-    print(f"[worker] Loading Whisper model '{WHISPER_MODEL}' …")
+    print(f"[worker] Loading Whisper '{WHISPER_MODEL}' …")
     model = whisper.load_model(WHISPER_MODEL)
 
-    archive_url = f"https://canal.parlamento.pt/arquivo?year={year}"
-    print(f"[worker] Fetching archive index from {archive_url} …")
+    # Optional diarizer
+    profiles = VoiceProfileDB()
+    diarizer: Diarizer | None = None
+    if HF_TOKEN and PYANNOTE_AVAILABLE:
+        if len(profiles) > 0:
+            print(f"[worker] Diarization enabled ({len(profiles)} voice profiles)")
+            diarizer = Diarizer(HF_TOKEN, profiles)
+        else:
+            print("[worker] HF_TOKEN set but no voice profiles — run build_profiles.py first")
+    else:
+        print("[worker] No diarization — set HF_TOKEN and build voice profiles to enable")
 
-    # Get list of session video URLs for the year
-    result = subprocess.run(
-        ["yt-dlp", "--flat-playlist", "--get-url", archive_url],
-        capture_output=True, text=True, timeout=120,
-    )
-    session_urls = [u.strip() for u in result.stdout.splitlines() if u.strip().startswith("http")]
+    print(f"\n[worker] Scraping {limit} latest sessions from ARTV Plenário …")
+    sessions = get_latest_session_urls(limit)
 
-    if not session_urls:
-        # Fallback: construct URLs from known pattern
-        print(f"[worker] yt-dlp playlist failed; trying direct page scrape …")
-        session_urls = scrape_archive_urls(year)
+    if not sessions:
+        print("[worker] No sessions found. Check scraper.py output.")
+        sys.exit(1)
 
-    print(f"[worker] Found {len(session_urls)} sessions for {year}")
+    for i, sess in enumerate(sessions, 1):
+        url   = sess["url"]
+        sdate = sess.get("date", "") or date.today().isoformat()
+        title = sess.get("title", "")
+        print(f"\n[worker] ── Session {i}/{len(sessions)}: {sdate} {title[:50]}")
+        print(f"          {url}")
 
-    for i, url in enumerate(session_urls, 1):
-        print(f"\n[worker] Session {i}/{len(session_urls)}: {url}")
         try:
-            process_archive_session(url, year, model)
-            time.sleep(2)  # polite delay between downloads
+            _process_session(url, sdate, model, diarizer)
         except Exception as e:
             print(f"[worker] ERROR: {e}")
             continue
+        time.sleep(2)
 
-    print(f"\n[worker] Done processing {year} archive!")
-
-
-def scrape_archive_urls(year: int) -> list[str]:
-    """Scrape the ARTV archive page to find session video URLs."""
-    import urllib.request
-    import html.parser
-
-    urls = []
-    page_url = f"https://canal.parlamento.pt/arquivo?year={year}"
-    try:
-        with urllib.request.urlopen(page_url, timeout=30) as resp:
-            html_content = resp.read().decode("utf-8", errors="replace")
-        # Find video/session links
-        pattern = re.compile(r'href=["\']([^"\']*(?:vod|sessao|plenario)[^"\']*)["\']', re.IGNORECASE)
-        raw = pattern.findall(html_content)
-        base = "https://canal.parlamento.pt"
-        for href in raw:
-            full = href if href.startswith("http") else base + href
-            if full not in urls:
-                urls.append(full)
-    except Exception as e:
-        print(f"[worker] Scrape failed: {e}")
-    return urls
+    print("\n[worker] All done.")
 
 
-def process_archive_session(video_url: str, year: int, model):
-    """Download, transcribe, and store one archive session."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = os.path.join(tmpdir, "audio.wav")
+def _process_session(video_url: str, session_date: str,
+                     model, diarizer: Diarizer | None):
+    """Download, transcribe, diarize, and store one archive session."""
+    with tempfile.TemporaryDirectory() as tmp:
+        raw_path = os.path.join(tmp, "session.wav")
 
-        print(f"  Downloading audio …", end="", flush=True)
-        subprocess.run(
-            [
-                "yt-dlp", "-x",
-                "--audio-format", "wav",
-                "--audio-quality", "0",
-                "--postprocessor-args", "-ar 16000 -ac 1",
-                "-o", audio_path,
-                video_url,
-            ],
-            capture_output=True, check=True,
-        )
+        print("[worker]   Downloading audio …", end="", flush=True)
+        download_audio(video_url, raw_path)
+        # Handle extension variation
+        if not Path(raw_path).exists():
+            candidates = list(Path(tmp).glob("session.*"))
+            if candidates:
+                raw_path = str(candidates[0])
         print(" done.")
 
-        # Extract session date from URL or metadata
-        date_match = re.search(r"(\d{4})[/-](\d{2})[/-](\d{2})", video_url)
-        if date_match:
-            session_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
-        else:
-            session_date = f"{year}-01-01"  # fallback
+        # Convert to 16 kHz mono if needed
+        wav_path = os.path.join(tmp, "audio16k.wav")
+        to_wav16k(raw_path, wav_path)
 
-        session_id = get_or_create_session(session_date)
+        session_id = get_or_create_session(session_date, video_url)
 
-        # Transcribe in chunks (Whisper handles long files automatically)
-        print(f"  Transcribing …", end="", flush=True)
-        result = model.transcribe(audio_path, language="pt", task="transcribe",
+        # ── Diarization (optional) ─────────────────────────────────────────
+        diar_segments: list[dict] = []
+        if diarizer:
+            print("[worker]   Diarizing …", end="", flush=True)
+            try:
+                diar_segments = diarizer.diarize(wav_path)
+                print(f" {len(diar_segments)} speaker segments.")
+            except Exception as e:
+                print(f" failed: {e}")
+
+        # ── Transcription ─────────────────────────────────────────────────
+        print("[worker]   Transcribing …", end="", flush=True)
+        result = model.transcribe(wav_path, language="pt", task="transcribe",
                                    verbose=False, word_timestamps=False)
-        print(" done.")
+        w_segs = result.get("segments", [])
+        print(f" {len(w_segs)} segments.")
 
-        # Process each Whisper segment as a transcript event
-        for seg in result.get("segments", []):
-            text = seg.get("text", "").strip()
-            if not text:
-                continue
-            filler_count, filler_words = detect_fillers(text)
-            post_event(
-                session_id  = session_id,
-                politician_id = None,   # TODO: speaker diarization
-                text        = text,
-                filler_count = filler_count,
-                filler_words = filler_words,
-                start_seconds = seg.get("start", 0),
-                duration    = seg.get("end", 0) - seg.get("start", 0),
-            )
+        # ── Align + post ───────────────────────────────────────────────────
+        aligned = (
+            align_whisper_to_diarization(w_segs, diar_segments)
+            if diar_segments else
+            [{**s, "politician_id": None, "confidence": 0.0} for s in w_segs]
+        )
 
-        total_text  = result.get("text", "")
+        # Group consecutive segments by the same politician into "turns"
+        turns = _group_into_turns(aligned)
+
+        session_fillers = 0
+        session_seconds = 0.0
+
+        for turn in turns:
+            text         = turn["text"]
+            pol_id       = turn["politician_id"]
+            start        = turn["start"]
+            duration     = turn["duration"]
+            fc, fw       = detect_fillers(text)
+            words        = len(text.split())
+            session_fillers  += fc
+            session_seconds  += duration
+
+            post_event(session_id, pol_id, text, fc, fw, start, duration,
+                       turn.get("confidence", 0.0))
+
+            if pol_id:
+                upsert_speech(session_id, pol_id, words, fc,
+                              int(duration), text[:300], fw)
+
+        total_text = result.get("text", "")
         total_fc, _ = detect_fillers(total_text)
-        total_words = len(total_text.split())
-        ratio       = total_fc / max(total_words, 1) * 100
-        print(f"  {total_words} words · {total_fc} fillers ({ratio:.1f}%)")
+        ratio = total_fc / max(len(total_text.split()), 1) * 100
+        print(f"[worker]   Done: {len(total_text.split())} words, "
+              f"{total_fc} fillers ({ratio:.1f}%)")
 
-        # Update session stats
-        supabase_request("PATCH", "sessions", {
-            "status": "completed",
-            "transcript_status": "done",
-            "total_filler_count": total_fc,
-            "total_speaking_minutes": round(result["segments"][-1]["end"] / 60, 1)
-                if result.get("segments") else 0,
-        }, query=f"?id=eq.{session_id}")
+        close_session(session_id, session_fillers, session_seconds / 60)
+
+
+def _group_into_turns(segments: list[dict],
+                      gap_threshold: float = 3.0) -> list[dict]:
+    """
+    Group consecutive Whisper segments by speaker into speech turns.
+    A new turn starts when the politician_id changes OR there is a gap
+    > gap_threshold seconds between segments.
+    """
+    if not segments:
+        return []
+
+    turns: list[dict] = []
+    cur_texts   = [segments[0].get("text", "")]
+    cur_pol     = segments[0].get("politician_id")
+    cur_start   = segments[0].get("start", 0.0)
+    cur_end     = segments[0].get("end", 0.0)
+    cur_conf    = segments[0].get("confidence", 0.0)
+
+    def flush():
+        turns.append({
+            "text":         " ".join(cur_texts).strip(),
+            "politician_id": cur_pol,
+            "start":        cur_start,
+            "duration":     max(cur_end - cur_start, 0.1),
+            "confidence":   cur_conf,
+        })
+
+    for seg in segments[1:]:
+        pol_id  = seg.get("politician_id")
+        t_start = seg.get("start", cur_end)
+        t_end   = seg.get("end",   t_start)
+        gap     = t_start - cur_end
+
+        if pol_id != cur_pol or gap > gap_threshold:
+            flush()
+            cur_texts = []
+            cur_pol   = pol_id
+            cur_start = t_start
+            cur_conf  = seg.get("confidence", 0.0)
+
+        cur_texts.append(seg.get("text", ""))
+        cur_end  = t_end
+
+    flush()
+    return turns
 
 
 # ─── Mode: FILE ───────────────────────────────────────────────────────────────
 
 def run_file(path: str):
-    """Process a single local video or audio file."""
-    import whisper  # type: ignore
-    print(f"[worker] Loading Whisper model '{WHISPER_MODEL}' …")
-    model = whisper.load_model(WHISPER_MODEL)
+    import whisper
 
-    if not os.path.exists(path):
+    if not Path(path).exists():
         print(f"[worker] File not found: {path}")
         sys.exit(1)
 
-    # Convert to 16 kHz WAV if needed
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        wav_path = f.name
+    print(f"[worker] Loading Whisper '{WHISPER_MODEL}' …")
+    model = whisper.load_model(WHISPER_MODEL)
 
-    print(f"[worker] Converting to WAV …")
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
-        capture_output=True, check=True,
-    )
+    profiles = VoiceProfileDB()
+    diarizer: Diarizer | None = None
+    if HF_TOKEN and PYANNOTE_AVAILABLE and len(profiles) > 0:
+        diarizer = Diarizer(HF_TOKEN, profiles)
 
-    session_id = get_or_create_session()
-    print(f"[worker] Transcribing {path} …")
-    result = model.transcribe(wav_path, language="pt", task="transcribe",
-                               verbose=False, word_timestamps=False)
-    os.unlink(wav_path)
-
-    for seg in result.get("segments", []):
-        text = seg.get("text", "").strip()
-        if not text:
-            continue
-        fc, fw = detect_fillers(text)
-        post_event(session_id, None, text, fc, fw, seg["start"], seg["end"] - seg["start"])
-
-    total_text = result.get("text", "")
-    fc, _ = detect_fillers(total_text)
-    print(f"[worker] Done: {len(total_text.split())} words, {fc} fillers ({fc/max(len(total_text.split()),1)*100:.1f}%)")
+    session_id = get_or_create_session(source_url=path)
+    _process_session(path, date.today().isoformat(), model, diarizer)
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
@@ -449,20 +528,25 @@ def run_file(path: str):
 if __name__ == "__main__":
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         print("ERROR: Set SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables.")
+        print("  export SUPABASE_URL=https://xxxxx.supabase.co")
+        print("  export SUPABASE_SERVICE_KEY=<service_role_key>")
         sys.exit(1)
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "live"
 
     if mode == "live":
         run_live()
-    elif mode == "archive":
-        year = int(sys.argv[2]) if len(sys.argv) > 2 else 2025
-        run_archive(year)
+
+    elif mode == "recent":
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+        run_recent(limit)
+
     elif mode == "file":
         if len(sys.argv) < 3:
-            print("Usage: python ai_worker.py file <path-to-video>")
+            print("Usage: python ai_worker.py file <path>")
             sys.exit(1)
         run_file(sys.argv[2])
+
     else:
-        print(f"Unknown mode: {mode}. Use: live | archive [year] | file <path>")
+        print(__doc__)
         sys.exit(1)
