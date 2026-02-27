@@ -58,18 +58,23 @@ const HLS_HEADERS = {
 // List ordered by likelihood based on Portuguese parliament infrastructure.
 
 const HLS_CANDIDATES: string[] = [
-  // Parliament own CDN patterns
+  // ── LiveExtend CDN — the actual ARTV/Canal Parlamento provider ──────────
+  // Confirmed via public IPTV repositories (iptv-org/iptv, LITUATUI/M3UPT).
+  "https://playout172.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  "https://playout175.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
+  "https://playout172.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
+  "https://playout175.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  // Additional playout nodes that LiveExtend uses (load balanced)
+  "https://playout173.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  "https://playout174.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  "https://playout176.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  // ── Parliament own infrastructure (fallback) ──────────────────────────
   "https://livepd3.parlamento.pt/artv/live.m3u8",
   "https://livepd3.parlamento.pt/plenario/live.m3u8",
   "https://livepd3.parlamento.pt/canal/live.m3u8",
-  "https://live.canal.parlamento.pt/hls/artv.m3u8",
-  "https://live.canal.parlamento.pt/hls/plenario.m3u8",
   "https://streaming.parlamento.pt/artv/live.m3u8",
-  "https://streaming.parlamento.pt/hls/artv/live.m3u8",
-  // RTP network (ARTV is an RTP group channel)
+  // ── RTP CDN (ARTV is distributed via RTP infrastructure) ─────────────
   "https://streaming.rtp.pt/liverepeater/smil:artv.smil/playlist.m3u8",
-  "https://streaming.rtp.pt/liveradio/artv/index.m3u8",
-  // Akamai CDN edges (common for Portuguese public media)
   "https://rdmedia.rtp.pt/artv/index.m3u8",
   "https://rdmedia.rtp.pt/liverepeater/smil:artv.smil/playlist.m3u8",
 ];

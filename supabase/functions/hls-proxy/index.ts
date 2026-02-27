@@ -16,13 +16,17 @@
  */
 
 const ALLOWED_HOSTS = [
+  // LiveExtend CDN — the actual ARTV/Canal Parlamento streaming provider
+  "livextend.cloud",
+  // Parliament own infrastructure
   "livepd3.parlamento.pt",
-  "streaming.rtp.pt",
-  "cdn-rtve.akamaized.net",
   "streaming.parlamento.pt",
   "canal.parlamento.pt",
   "parlamento.pt",
-  // Akamai / generic CDN edges that ARTV may use
+  // RTP CDN (ARTV is an RTP group channel)
+  "streaming.rtp.pt",
+  "rdmedia.rtp.pt",
+  // Akamai / generic CDN edges
   "akamaized.net",
   "akamaihd.net",
   "edgekey.net",
@@ -91,11 +95,12 @@ Deno.serve(async (req: Request) => {
     upstream = await fetch(target, {
       method: req.method,
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://canal.parlamento.pt/",
+        "Origin": "https://canal.parlamento.pt",
         // Forward Range header for partial content (needed for some CDNs)
         ...(req.headers.get("Range") ? { Range: req.headers.get("Range")! } : {}),
       },
-      // Don't follow redirects so we can rewrite Location header
       redirect: "follow",
     });
   } catch (e) {
