@@ -76,7 +76,13 @@ export function ArtvPlayer({ streamUrl, onStatus }: ArtvPlayerProps) {
         // xhrSetup intercepts EVERY request hls.js makes — both the .m3u8
         // playlist fetch and every subsequent TS segment fetch — and wraps
         // them through our hls-proxy so the CDN sees the right Referer/Origin.
+        //
+        // IMPORTANT: hls-proxy rewrites playlist segment URLs to already point
+        // back through the proxy (supabase.co/functions/v1/hls-proxy?url=...).
+        // We must skip re-wrapping those URLs or hls-proxy gets called with a
+        // supabase.co URL which is not in its allowlist → 403.
         xhrSetup(xhr, reqUrl) {
+          if (reqUrl.startsWith(SUPABASE_URL)) return; // already proxied
           if (
             reqUrl.startsWith("http") &&
             !reqUrl.includes(window.location.host)
@@ -100,18 +106,55 @@ export function ArtvPlayer({ streamUrl, onStatus }: ArtvPlayerProps) {
         video.play().catch(() => {});
       });
 
-      let fallbackIdx = 0;
+      // Fallback chain: proxied playout nodes → then direct CDN (no proxy,
+      // last resort in case hls-proxy isn't deployed yet or CDN allows CORS).
+      const PROXIED_FALLBACKS = ARTV_FALLBACKS.map((u) => u); // proxied via xhrSetup
+      const DIRECT_FALLBACKS  = [url, ...ARTV_FALLBACKS];     // raw CDN, no proxy
+      let fallbackIdx  = 0;
+      let directMode   = false;
+
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data.fatal) return; // non-fatal: hls.js self-heals
 
         console.warn("[artv] fatal error:", data.type, data.details);
 
-        if (fallbackIdx < ARTV_FALLBACKS.length) {
-          const next = ARTV_FALLBACKS[fallbackIdx++];
-          console.log("[artv] trying fallback node:", next);
+        if (!directMode && fallbackIdx < PROXIED_FALLBACKS.length) {
+          // Still trying proxied fallback nodes
+          const next = PROXIED_FALLBACKS[fallbackIdx++];
+          console.log("[artv] trying proxied fallback:", next);
           hls.stopLoad();
           hls.loadSource(next);
           hls.startLoad();
+        } else if (!directMode) {
+          // All proxied nodes exhausted → try direct CDN (no proxy)
+          directMode  = true;
+          fallbackIdx = 0;
+          // Temporarily disable proxy for this attempt
+          const directUrl = DIRECT_FALLBACKS[fallbackIdx++];
+          console.log("[artv] trying direct CDN:", directUrl);
+          hls.stopLoad();
+          // Re-create hls without xhrSetup proxy so requests go direct
+          hls.destroy();
+          const hlsDirect = new Hls({ maxBufferLength: 20, liveSyncDurationCount: 3 });
+          hlsRef.current = hlsDirect;
+          hlsDirect.loadSource(directUrl);
+          hlsDirect.attachMedia(video);
+          hlsDirect.on(Hls.Events.MANIFEST_PARSED, () => {
+            updateStatus("playing");
+            video.play().catch(() => {});
+          });
+          hlsDirect.on(Hls.Events.ERROR, (_e, d) => {
+            if (!d.fatal) return;
+            if (fallbackIdx < DIRECT_FALLBACKS.length) {
+              const next = DIRECT_FALLBACKS[fallbackIdx++];
+              console.log("[artv] trying direct fallback:", next);
+              hlsDirect.stopLoad();
+              hlsDirect.loadSource(next);
+              hlsDirect.startLoad();
+            } else {
+              updateStatus("error");
+            }
+          });
         } else {
           updateStatus("error");
         }
