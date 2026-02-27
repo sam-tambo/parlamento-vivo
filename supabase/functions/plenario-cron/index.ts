@@ -357,7 +357,15 @@ function isWithinBroadcastHours(): boolean {
   return h >= SESSION_START_HOUR && h < SESSION_END_HOUR;
 }
 
-const CORS = { "Access-Control-Allow-Origin": "*" };
+// Full CORS headers required for browser-initiated requests.
+// Access-Control-Allow-Headers MUST list every header the browser sends
+// in the preflight Access-Control-Request-Headers — omitting any one of
+// them causes the preflight to fail with a network error (no HTTP status).
+const CORS = {
+  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+};
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
