@@ -42,6 +42,13 @@ COMMANDS:
   python build_profiles.py delete <politician_id>
       Remove a profile.
 
+  python build_profiles.py dar auto [--sessions N]
+      Auto-build profiles from DAR transcripts + ARTV archive (no manual labels needed).
+      Equivalent to: python dar_profiles.py auto --sessions N
+
+  python build_profiles.py dar status
+      Show voice profile coverage across all deputies.
+
 HOW TO FIND GOOD TRAINING CLIPS:
   - ARTV archive: canal.parlamento.pt/plenario (select a past session)
   - YouTube: search "Pedro Nuno Santos Assembleia República" for a clean clip
@@ -328,6 +335,15 @@ if __name__ == "__main__":
             print("Usage: python build_profiles.py delete <politician_id>")
             sys.exit(1)
         cmd_delete(sys.argv[2])
+
+    elif cmd == "dar":
+        # Delegate to dar_profiles.py — pass remaining args through
+        import subprocess as _sp
+        _sp.run(
+            [sys.executable, str(Path(__file__).parent / "dar_profiles.py")]
+            + (sys.argv[2:] or ["auto"]),
+            check=False,
+        )
 
     else:
         print(f"Unknown command: {cmd}")
