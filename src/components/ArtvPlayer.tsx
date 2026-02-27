@@ -3,13 +3,19 @@
  * =========================================================
  * Loads the ARTV HLS stream from the LiveExtend CDN, routing every
  * request (playlist + TS segments) through our hls-proxy edge function.
- * The proxy adds the Referer/Origin headers the CDN requires, rewrites
- * all segment URLs so subsequent requests also stay proxied, and adds
- * CORS headers so hls.js can read the responses cross-origin.
  *
- * Why not an iframe?
- *   canal.parlamento.pt's player JS does not initialise inside a cross-
- *   origin iframe — it checks window.top and aborts, leaving a black screen.
+ * Audio capture notes:
+ *   - <video muted> is required for Chrome/Firefox autoplay policy.
+ *   - The parent's onReady callback calls startCapture(), which sets
+ *     video.muted = false *before* calling captureStream(). Chrome only
+ *     initialises the audio decoder pipeline when the video is unmuted.
+ *   - onReadyRef: keeps the onReady prop fresh inside useEffect closures
+ *     so stale-closure bugs don't cause captureStream to get the wrong
+ *     sessionId or the wrong video reference.
+ *   - onPlaying listener is NOT removed after first call so re-plays
+ *     (seek, rebuffer, manual play after autoplay-block) also trigger
+ *     the parent capture logic. The parent's captureActiveRef guards
+ *     against starting capture twice.
  *
  * Fallback chain:
  *   1. hls.js + hls-proxy  (Chrome / Firefox / Edge)
@@ -18,15 +24,14 @@
  */
 
 import Hls from "hls.js";
-import { useRef, useEffect, useState, useCallback } from "react";
-import { Loader2, ExternalLink, WifiOff, RefreshCw } from "lucide-react";
+import { useRef, useEffect, useState, useCallback, useLayoutEffect } from "react";
+import { Loader2, ExternalLink, WifiOff, RefreshCw, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 // ── Confirmed stream URLs (iptv-org/iptv pt.m3u — community-maintained) ──────
 const ARTV_PRIMARY =
   "https://playout172.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8";
 
-// Alternative playout nodes on the same CDN — tried sequentially on fatal error
 const ARTV_FALLBACKS = [
   "https://playout175.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
   "https://playout173.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
@@ -39,19 +44,25 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const PROXY = (url: string) =>
   `${SUPABASE_URL}/functions/v1/hls-proxy?url=${encodeURIComponent(url)}`;
 
-type Status = "loading" | "playing" | "error";
+type Status = "loading" | "playing" | "paused" | "error";
 
 interface ArtvPlayerProps {
   /** Override URL from sessions.artv_stream_url (cached by plenario-cron). */
   streamUrl?: string | null;
-  onStatus?: (s: Status) => void;
-  /** Called once the video element starts playing — lets the parent capture audio. */
+  onStatus?: (s: "loading" | "playing" | "error") => void;
+  /** Called every time the video element starts/resumes playing.
+   *  Parent guards against duplicate capture starts with captureActiveRef. */
   onReady?: (video: HTMLVideoElement) => void;
 }
 
 export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const hlsRef   = useRef<Hls | null>(null);
+  const videoRef  = useRef<HTMLVideoElement>(null);
+  const hlsRef    = useRef<Hls | null>(null);
+
+  // Keep the latest onReady prop in a ref so the playing-event listener
+  // always calls the current prop, not the one captured at mount time.
+  const onReadyRef = useRef(onReady);
+  useLayoutEffect(() => { onReadyRef.current = onReady; });
 
   const [status,  setStatus]  = useState<Status>("loading");
   const [attempt, setAttempt] = useState(0);
@@ -63,9 +74,8 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
 
   const updateStatus = useCallback((s: Status) => {
     setStatus(s);
-    onStatus?.(s);
-    // NOTE: onReady is NOT called here — it fires on the video "playing" event
-    // below so that audio tracks are guaranteed to be active when startCapture runs.
+    // Expose only the 3 public states to the parent
+    if (s !== "paused") onStatus?.(s as "loading" | "playing" | "error");
   }, [onStatus]);
 
   useEffect(() => {
@@ -74,23 +84,21 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
 
     updateStatus("loading");
 
+    // ── Shared playing-event handler ──────────────────────────────────────────
+    // Fires on every play() call (including after autoplay-block, seek,
+    // rebuffer). Not removed so re-plays also call onReady. Parent's
+    // captureActiveRef prevents duplicate capture starts.
+    const onPlaying = () => {
+      onReadyRef.current?.(video);
+    };
+    video.addEventListener("playing", onPlaying);
+
     // ── hls.js (Chrome / Firefox / Edge) ─────────────────────────────────────
     if (Hls.isSupported()) {
       const hls = new Hls({
-        // xhrSetup intercepts EVERY request hls.js makes — both the .m3u8
-        // playlist fetch and every subsequent TS segment fetch — and wraps
-        // them through our hls-proxy so the CDN sees the right Referer/Origin.
-        //
-        // IMPORTANT: hls-proxy rewrites playlist segment URLs to already point
-        // back through the proxy (supabase.co/functions/v1/hls-proxy?url=...).
-        // We must skip re-wrapping those URLs or hls-proxy gets called with a
-        // supabase.co URL which is not in its allowlist → 403.
         xhrSetup(xhr, reqUrl) {
           if (reqUrl.startsWith(SUPABASE_URL)) return; // already proxied
-          if (
-            reqUrl.startsWith("http") &&
-            !reqUrl.includes(window.location.host)
-          ) {
+          if (reqUrl.startsWith("http") && !reqUrl.includes(window.location.host)) {
             xhr.open("GET", PROXY(reqUrl), true);
           }
         },
@@ -106,46 +114,37 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         updateStatus("playing");
-        video.play().catch(() => {});
+        // muted=true guarantees autoplay is allowed in all browsers.
+        // startCapture() will unmute the video before calling captureStream().
+        video.play().catch(() => {
+          // Even muted autoplay can be blocked in some strict browser configs.
+          // Show "click to play" overlay; onPlaying fires when user clicks.
+          updateStatus("paused");
+        });
       });
 
-      // Fire onReady only when the video is ACTUALLY playing (not just parsed).
-      // At this point audio segments are buffered and captureStream() returns
-      // real audio tracks — calling it at MANIFEST_PARSED is too early.
-      const onPlaying = () => {
-        video.removeEventListener("playing", onPlaying);
-        if (onReady) onReady(video);
-      };
-      video.addEventListener("playing", onPlaying);
-
-      // Fallback chain: proxied playout nodes → then direct CDN (no proxy,
-      // last resort in case hls-proxy isn't deployed yet or CDN allows CORS).
-      const PROXIED_FALLBACKS = ARTV_FALLBACKS.map((u) => u); // proxied via xhrSetup
-      const DIRECT_FALLBACKS  = [url, ...ARTV_FALLBACKS];     // raw CDN, no proxy
+      const PROXIED_FALLBACKS = ARTV_FALLBACKS.map((u) => u);
+      const DIRECT_FALLBACKS  = [url, ...ARTV_FALLBACKS];
       let fallbackIdx  = 0;
       let directMode   = false;
 
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (!data.fatal) return; // non-fatal: hls.js self-heals
+        if (!data.fatal) return;
 
         console.warn("[artv] fatal error:", data.type, data.details);
 
         if (!directMode && fallbackIdx < PROXIED_FALLBACKS.length) {
-          // Still trying proxied fallback nodes
           const next = PROXIED_FALLBACKS[fallbackIdx++];
           console.log("[artv] trying proxied fallback:", next);
           hls.stopLoad();
           hls.loadSource(next);
           hls.startLoad();
         } else if (!directMode) {
-          // All proxied nodes exhausted → try direct CDN (no proxy)
           directMode  = true;
           fallbackIdx = 0;
-          // Temporarily disable proxy for this attempt
           const directUrl = DIRECT_FALLBACKS[fallbackIdx++];
           console.log("[artv] trying direct CDN:", directUrl);
           hls.stopLoad();
-          // Re-create hls without xhrSetup proxy so requests go direct
           hls.destroy();
           const hlsDirect = new Hls({ maxBufferLength: 20, liveSyncDurationCount: 3 });
           hlsRef.current = hlsDirect;
@@ -153,7 +152,7 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
           hlsDirect.attachMedia(video);
           hlsDirect.on(Hls.Events.MANIFEST_PARSED, () => {
             updateStatus("playing");
-            video.play().catch(() => {});
+            video.play().catch(() => updateStatus("paused"));
           });
           hlsDirect.on(Hls.Events.ERROR, (_e, d) => {
             if (!d.fatal) return;
@@ -180,26 +179,27 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
     }
 
     // ── Safari native HLS ─────────────────────────────────────────────────────
-    // Safari decodes HLS inside <video> natively — no XHR interception needed.
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;
 
-      const onMeta    = () => { updateStatus("playing"); video.play().catch(() => {}); };
-      const onPlaying = () => { video.removeEventListener("playing", onPlaying); if (onReady) onReady(video); };
-      const onError   = () => updateStatus("error");
+      const onMeta  = () => {
+        updateStatus("playing");
+        video.play().catch(() => updateStatus("paused"));
+      };
+      const onError = () => updateStatus("error");
 
       video.addEventListener("loadedmetadata", onMeta);
-      video.addEventListener("playing",        onPlaying);
       video.addEventListener("error",          onError);
 
       return () => {
-        video.removeEventListener("loadedmetadata", onMeta);
-        video.removeEventListener("playing",        onPlaying);
-        video.removeEventListener("error",          onError);
+        video.removeEventListener("playing",         onPlaying);
+        video.removeEventListener("loadedmetadata",  onMeta);
+        video.removeEventListener("error",           onError);
       };
     }
 
-    // Neither supported → error immediately
+    // Neither supported → error
+    video.removeEventListener("playing", onPlaying);
     updateStatus("error");
   }, [url, attempt, updateStatus]);
 
@@ -211,11 +211,13 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
 
   return (
     <div className="relative bg-black" style={{ paddingTop: "56.25%" }}>
-      {/* <video> is always in the DOM so hls.js can attach to it */}
+      {/* <video muted> allows autoplay without user gesture.
+          startCapture() unmutes it before calling captureStream(). */}
       <video
         ref={videoRef}
         className="absolute inset-0 w-full h-full"
         controls
+        muted
         playsInline
         style={{ display: status === "error" ? "none" : "block" }}
       />
@@ -225,6 +227,17 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
           <p className="text-sm text-white/60">A ligar ao stream ARTV…</p>
+        </div>
+      )}
+
+      {/* Autoplay-blocked overlay — user must click to enable audio */}
+      {status === "paused" && (
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/60 cursor-pointer hover:bg-black/40 transition-colors"
+          onClick={() => videoRef.current?.play()}
+        >
+          <PlayCircle className="h-16 w-16 text-white opacity-80" />
+          <p className="text-sm text-white/70">Clique para reproduzir com áudio</p>
         </div>
       )}
 
