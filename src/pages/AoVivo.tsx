@@ -45,6 +45,7 @@ export default function AoVivo() {
   const captureActiveRef   = useRef(false);
   const recorderRef        = useRef<MediaRecorder | null>(null);
   const audioStreamRef     = useRef<MediaStream | null>(null);
+  const audioCtxRef        = useRef<AudioContext | null>(null);
 
   const { data: activeSession } = useActiveSession();
   const { data: existingEvents } = useTranscriptEvents(activeSession?.id);
@@ -138,31 +139,58 @@ export default function AoVivo() {
   }, [sendChunk]);
 
   // ── Start browser audio capture from the <video> element ──────────────────
-  const startCapture = useCallback((video: HTMLVideoElement, sessionId: string | undefined) => {
-    if (captureActiveRef.current) return; // already running
-
-    if (typeof video.captureStream !== "function") {
-      setCronState("error");
-      setCronMsg("captureStream não suportado neste browser — use Chrome ou Firefox");
-      return;
-    }
+  //
+  // Two-attempt strategy:
+  //   1. captureStream() — preferred; but Chrome won't include audio tracks
+  //      if the video was muted during playback (no audio decoder started).
+  //      Fix: unmute first, wait briefly, then capture.
+  //   2. Web Audio API (createMediaElementSource) — fallback. Works because
+  //      hls.js sets video.src to a blob:// MediaSource URL (always same-origin),
+  //      so no CORS taint even though the CDN segments are cross-origin.
+  const startCapture = useCallback(async (video: HTMLVideoElement, sessionId: string | undefined) => {
+    if (captureActiveRef.current) return;
 
     try {
-      const stream = video.captureStream();
-      const audio  = stream.getAudioTracks();
+      // Unmute: Chrome skips the audio decoder for muted MSE video, which
+      // makes captureStream() return a stream with no audio tracks.
+      video.muted = false;
 
-      if (!audio.length) {
+      // Short pause so the audio pipeline can initialize after unmuting.
+      await new Promise<void>(res => setTimeout(res, 400));
+
+      let audioStream: MediaStream | null = null;
+
+      // Attempt 1: captureStream()
+      if (typeof video.captureStream === "function") {
+        const captured = video.captureStream();
+        const tracks   = captured.getAudioTracks();
+        if (tracks.length) audioStream = new MediaStream(tracks);
+      }
+
+      // Attempt 2: Web Audio API (works even if captureStream has no audio)
+      if (!audioStream) {
+        const AudioCtx = window.AudioContext ?? (window as any).webkitAudioContext as typeof AudioContext;
+        if (AudioCtx) {
+          const ctx    = new AudioCtx();
+          audioCtxRef.current = ctx;
+          const source = ctx.createMediaElementSource(video);
+          source.connect(ctx.destination);              // keep playing through speakers
+          const dest   = ctx.createMediaStreamDestination();
+          source.connect(dest);                         // also route to recorder
+          audioStream  = dest.stream;
+        }
+      }
+
+      if (!audioStream || !audioStream.getAudioTracks().length) {
         setCronState("error");
-        setCronMsg("Sem pista de áudio no stream — verifique se o vídeo está a reproduzir");
+        setCronMsg("Sem pista de áudio — verifique se o browser suporta MediaRecorder (Chrome/Firefox)");
         return;
       }
 
-      const audioStream = new MediaStream(audio);
       audioStreamRef.current = audioStream;
       captureActiveRef.current = true;
-
       setCronState("running");
-      setCronMsg("Captura de áudio ativa — primeiro resultado em ~30 s");
+      setCronMsg("Captura ativa — primeiro resultado em ~30 s");
       recordChunk(audioStream, sessionId);
     } catch (e) {
       setCronState("error");
@@ -175,6 +203,7 @@ export default function AoVivo() {
     return () => {
       captureActiveRef.current = false;
       recorderRef.current?.stop();
+      audioCtxRef.current?.close();
     };
   }, []);
 
