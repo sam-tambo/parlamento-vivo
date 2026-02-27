@@ -34,6 +34,34 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const ARTV_PLENARIO = "https://canal.parlamento.pt/plenario";
 
+/**
+ * Try to find an HLS .m3u8 URL by fetching the page HTML/JS source.
+ * Works when the stream URL is embedded as a string literal in the page bundle.
+ */
+async function discoverHlsFromPage(pageUrl: string): Promise<string | null> {
+  try {
+    const resp = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    if (!resp.ok) return null;
+    const html = await resp.text();
+
+    // Look for explicit .m3u8 URLs
+    const m3u8Match = html.match(/(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/);
+    if (m3u8Match) return m3u8Match[1];
+
+    // Look for common HLS/live streaming path patterns
+    const streamMatch = html.match(/(https?:\/\/[^\s"'<>]+\/(?:live|hls|stream)[^\s"'<>]+)/);
+    if (streamMatch) return streamMatch[1];
+  } catch (e) {
+    console.warn("[cron] HLS page discovery error:", e);
+  }
+  return null;
+}
+
 // Parliament typically sits Mon–Fri, 10:00–19:30 Lisbon time
 // Outside these hours we skip processing to avoid empty audio errors
 function isParliamentHours(): boolean {
@@ -104,11 +132,24 @@ Deno.serve(async (req: Request) => {
     console.log(`[cron] Created session ${session.id} for ${today}`);
   }
 
-  const streamUrl = session.artv_stream_url;
+  let streamUrl = session.artv_stream_url;
 
-  // If the stored URL is just the landing page (not an HLS URL), we can't
-  // process audio yet. Return a clear message so operators know to run the
-  // Python scraper once to discover the real HLS URL.
+  // If the stored URL is just the landing page (not an HLS URL), try to
+  // discover the real stream URL by fetching the page source.
+  if (!streamUrl || !streamUrl.includes(".m3u8")) {
+    console.log("[cron] No HLS URL stored — attempting page discovery…");
+    const discovered = await discoverHlsFromPage(ARTV_PLENARIO);
+    if (discovered) {
+      console.log(`[cron] Discovered HLS URL: ${discovered.slice(0, 80)}`);
+      await supabase
+        .from("sessions")
+        .update({ artv_stream_url: discovered, transcript_status: "processing" })
+        .eq("id", session.id);
+      streamUrl = discovered;
+    }
+  }
+
+  // If still no valid HLS URL, return waiting message
   if (!streamUrl || !streamUrl.includes(".m3u8")) {
     return Response.json({
       session_id: session.id,

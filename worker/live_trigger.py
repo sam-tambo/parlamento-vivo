@@ -90,11 +90,50 @@ def rest_patch(path: str, data: dict):
 
 # ─── HLS discovery ────────────────────────────────────────────────────────────
 
+def _hls_from_html(page_url: str) -> str | None:
+    """
+    Fetch the page HTML/JS source and regex-search for an HLS .m3u8 URL.
+    Works when the stream URL is embedded as a string literal in the page bundle.
+    """
+    import re
+    try:
+        req = urllib.request.Request(
+            page_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            html = r.read().decode("utf-8", errors="replace")
+
+        # Explicit .m3u8 URL
+        m = re.search(r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', html)
+        if m:
+            return m.group(1)
+
+        # Common HLS / live-stream path patterns
+        m = re.search(r'(https?://[^\s"\'<>]+/(?:live|hls|stream)[^\s"\'<>]+)', html)
+        if m:
+            return m.group(1)
+
+    except Exception as e:
+        print(f"[trigger] HTML fetch error: {e}", file=sys.stderr)
+    return None
+
+
 def find_hls_url() -> str | None:
     """
-    Use yt-dlp to extract the live HLS stream URL from the ARTV Plenário page.
-    yt-dlp handles JS-rendered pages for many sites and can discover HLS playlists
-    even without a browser (it uses the site's API endpoints directly).
+    Extract the live HLS stream URL from the ARTV Plenário page.
+
+    Tries (in order):
+      1. yt-dlp  — handles JS-rendered pages and many live stream sites
+      2. streamlink — fast for known live stream sites
+      3. Direct HTML fetch — parses page source for embedded m3u8 URLs
     """
     for fmt in ["best[protocol=m3u8_native]", "best[protocol=m3u8]", "best"]:
         try:
@@ -108,10 +147,10 @@ def find_hls_url() -> str | None:
                     return line
         except FileNotFoundError:
             print("[trigger] yt-dlp not found — install with: pip install yt-dlp", file=sys.stderr)
-            return None
+            break   # don't keep looping if tool is missing
         except subprocess.TimeoutExpired:
             print("[trigger] yt-dlp timed out", file=sys.stderr)
-            return None
+            break
         except Exception as e:
             print(f"[trigger] yt-dlp error: {e}", file=sys.stderr)
 
@@ -129,7 +168,9 @@ def find_hls_url() -> str | None:
     except Exception as e:
         print(f"[trigger] streamlink error: {e}", file=sys.stderr)
 
-    return None
+    # Last resort: fetch page HTML and look for embedded m3u8 URLs
+    print("[trigger] Trying direct HTML fetch for HLS URL…", file=sys.stderr)
+    return _hls_from_html(ARTV_URL)
 
 
 # ─── Session management ───────────────────────────────────────────────────────

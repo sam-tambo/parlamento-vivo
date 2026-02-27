@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { PARTY_COLORS, mockPoliticians } from "@/lib/mock-data";
-import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS, FILLER_CATALOG } from "@/lib/filler-words";
-import { useActiveSession, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
+import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS, FILLER_CATALOG, countFillers } from "@/lib/filler-words";
+import { useActiveSession, useTranscriptEvents, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
 
 // ─── Demo simulation data ───────────────────────────────────────────────────
 const DEMO_EVENTS: Omit<TranscriptEvent, "id" | "created_at">[] = [
@@ -80,6 +80,7 @@ export default function AoVivo() {
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [demoRunning, setDemoRunning] = useState(false);
   const [demoIndex, setDemoIndex] = useState(0);
+  const [micActive, setMicActive] = useState(false);
   const [sessionStats, setSessionStats] = useState({
     totalFillers: 0,
     totalWords: 0,
@@ -88,12 +89,43 @@ export default function AoVivo() {
   });
   const feedRef = useRef<HTMLDivElement>(null);
   const demoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const seenIds = useRef(new Set<string>());
+  const micActiveRef = useRef(false);
+  const recognitionRef = useRef<any>(null);
 
   const { data: activeSession } = useActiveSession();
 
-  // Supabase Realtime handler
+  // Load existing events for the current session on mount / session change
+  const { data: existingEvents } = useTranscriptEvents(activeSession?.id);
+  useEffect(() => {
+    if (!existingEvents?.length) return;
+    const fresh = existingEvents.filter(ev => ev.id && !seenIds.current.has(ev.id));
+    if (!fresh.length) return;
+    for (const ev of fresh) seenIds.current.add(ev.id!);
+    const liveOnes = fresh.map(ev => ({ ...ev, id: ev.id! })) as LiveEvent[];
+    setEvents(prev =>
+      [...liveOnes, ...prev]
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 60)
+    );
+    setSessionStats(s => {
+      let { totalFillers, totalWords, duration, eventCount } = s;
+      for (const ev of fresh) {
+        totalFillers += ev.filler_count;
+        totalWords += ev.total_words;
+        duration += ev.duration_seconds ?? 30;
+        eventCount++;
+      }
+      return { totalFillers, totalWords, duration, eventCount };
+    });
+  }, [existingEvents]);
+
+  // Supabase Realtime handler (deduplicated)
   const handleNewEvent = useCallback((ev: TranscriptEvent) => {
-    const live: LiveEvent = { ...ev, id: ev.id ?? crypto.randomUUID(), created_at: new Date().toISOString() };
+    const id = ev.id ?? crypto.randomUUID();
+    if (seenIds.current.has(id)) return;
+    seenIds.current.add(id);
+    const live: LiveEvent = { ...ev, id, created_at: ev.created_at ?? new Date().toISOString() };
     setEvents(prev => [live, ...prev].slice(0, 60));
     setSessionStats(s => ({
       totalFillers: s.totalFillers + ev.filler_count,
@@ -148,7 +180,65 @@ export default function AoVivo() {
     if (demoIntervalRef.current) clearInterval(demoIntervalRef.current);
   };
 
-  const isLive = !!activeSession || demoRunning;
+  // ─── Browser microphone transcription (Web Speech API) ────────────────────
+  const startMic = useCallback(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      alert("Reconhecimento de voz não disponível. Usa o Google Chrome ou Microsoft Edge.");
+      return;
+    }
+    const r = new SR();
+    r.lang = "pt-PT";
+    r.continuous = true;
+    r.interimResults = false;
+    r.maxAlternatives = 1;
+
+    r.onresult = (e: any) => {
+      const last = e.results[e.results.length - 1];
+      if (!last.isFinal) return;
+      const text = last[0].transcript.trim();
+      if (!text) return;
+      const fw = countFillers(text);
+      const fc = Object.values(fw).reduce((a: number, b: number) => a + b, 0);
+      handleNewEvent({
+        id: crypto.randomUUID(),
+        session_id: activeSession?.id ?? null,
+        politician_id: null,
+        text_segment: text,
+        filler_count: fc,
+        total_words: text.split(/\s+/).filter(Boolean).length,
+        filler_words_found: fw,
+        start_seconds: null,
+        duration_seconds: null,
+        created_at: new Date().toISOString(),
+      });
+    };
+
+    r.onerror = (e: any) => {
+      if (e.error === "not-allowed" || e.error === "audio-capture") {
+        micActiveRef.current = false;
+        setMicActive(false);
+      }
+    };
+
+    r.onend = () => {
+      if (micActiveRef.current) r.start(); // auto-restart to keep listening
+    };
+
+    recognitionRef.current = r;
+    r.start();
+    micActiveRef.current = true;
+    setMicActive(true);
+  }, [activeSession?.id, handleNewEvent]);
+
+  const stopMic = useCallback(() => {
+    micActiveRef.current = false;
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    setMicActive(false);
+  }, []);
+
+  const isLive = !!activeSession || demoRunning || micActive;
   const fillerRate = sessionStats.totalWords > 0 ? sessionStats.totalFillers / sessionStats.totalWords : 0;
   const grade = gradeFillerRate(fillerRate);
   const currentSpeaker = events[0]?.politician ?? null;
@@ -163,7 +253,7 @@ export default function AoVivo() {
             {isLive && (
               <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/15 border border-red-500/30 text-red-400 text-xs font-semibold">
                 <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />
-                {isDemoMode ? "DEMO" : "AO VIVO"}
+                {isDemoMode ? "DEMO" : micActive ? "MICROFONE" : "AO VIVO"}
               </span>
             )}
           </div>
@@ -180,9 +270,21 @@ export default function AoVivo() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Live microphone button */}
+          {!micActive ? (
+            <Button onClick={startMic} className="gap-2" variant={activeSession && !demoRunning ? "default" : "outline"}>
+              <Mic className="h-4 w-4" /> Ouvir Microfone
+            </Button>
+          ) : (
+            <Button onClick={stopMic} variant="destructive" className="gap-2">
+              <MicOff className="h-4 w-4" /> Parar Microfone
+            </Button>
+          )}
+
+          {/* Demo mode button */}
           {!demoRunning ? (
-            <Button onClick={startDemo} className="gap-2" variant={activeSession ? "outline" : "default"}>
+            <Button onClick={startDemo} className="gap-2" variant="outline">
               <Play className="h-4 w-4" /> Modo Demo
             </Button>
           ) : (
@@ -190,6 +292,7 @@ export default function AoVivo() {
               <MicOff className="h-4 w-4" /> Parar Demo
             </Button>
           )}
+
           <a
             href="https://canal.parlamento.pt/plenario"
             target="_blank"
@@ -249,6 +352,20 @@ export default function AoVivo() {
                   <span className="text-sm font-semibold">Ativo</span>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {/* Microphone active indicator */}
+          {micActive && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card rounded-xl p-3 border-green-500/30 bg-green-500/5 flex items-center gap-2"
+            >
+              <Mic className="h-4 w-4 text-green-400 animate-pulse shrink-0" />
+              <p className="text-xs text-green-300">
+                A ouvir via microfone — coloca o dispositivo perto da fonte de áudio do stream
+              </p>
             </motion.div>
           )}
 
