@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.plenario-cron]
 verify_jwt = false
+
+[functions.scrape-politicians]
+verify_jwt = false
