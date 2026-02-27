@@ -11,6 +11,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { PARTY_COLORS, mockPoliticians } from "@/lib/mock-data";
 import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS } from "@/lib/filler-words";
 import { useActiveSession, useTranscriptEvents, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
+import { ArtvPlayer } from "@/components/ArtvPlayer";
 
 // ─── Supabase credentials (public anon key — safe to expose) ────────────────
 const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL as string;
@@ -291,16 +292,8 @@ export default function AoVivo() {
               </div>
             </div>
 
-            {/* Embedded parliament player (iframe — no HLS/CORS issues) */}
-            <div className="relative bg-black" style={{ paddingTop: "56.25%" }}>
-              <iframe
-                src="https://canal.parlamento.pt/arplayer"
-                className="absolute inset-0 w-full h-full border-0"
-                allow="autoplay; fullscreen; picture-in-picture"
-                allowFullScreen
-                title="Canal Parlamento ao vivo"
-              />
-            </div>
+            {/* hls.js player — LiveExtend CDN via hls-proxy (no iframe) */}
+            <ArtvPlayer streamUrl={activeSession?.artv_stream_url} />
 
             {/* Status bar */}
             <div className="px-4 py-2 text-xs text-muted-foreground flex items-center justify-between border-t border-border/40">
@@ -403,7 +396,7 @@ export default function AoVivo() {
           <div className="glass-card rounded-xl p-5">
             <h3 className="font-semibold mb-2 text-sm">Como funciona</h3>
             <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside">
-              <li>Stream ARTV via <strong>Canal Parlamento</strong> (iframe)</li>
+              <li>Stream ARTV via <strong>LiveExtend CDN</strong> · hls.js + proxy</li>
               <li>Captura automática a cada <strong>60 s</strong> pelo servidor</li>
               <li>Segmentos HLS descarregados e transcribed com <strong>Whisper</strong></li>
               <li>Enchimentos detectados e pontuados por categoria</li>
