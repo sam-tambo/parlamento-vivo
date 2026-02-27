@@ -1,76 +1,51 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Radio, ExternalLink, Zap, Clock, AlertCircle, Play, Tv2, Wifi, WifiOff } from "lucide-react";
+import {
+  Radio, ExternalLink, Zap, Clock, Play, Tv2,
+  Wifi, WifiOff, RefreshCw, CheckCircle2, AlertCircle,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { PARTY_COLORS, mockPoliticians } from "@/lib/mock-data";
-import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS, countFillers } from "@/lib/filler-words";
+import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS } from "@/lib/filler-words";
 import { useActiveSession, useTranscriptEvents, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
-import LiveStreamPlayer, { type PlayerStatus, type TranscribeResult } from "@/components/LiveStreamPlayer";
 
 // ─── Supabase credentials (public anon key — safe to expose) ────────────────
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
+const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
-
-// ─── Known ARTV HLS URL candidates ───────────────────────────────────────────
-// LiveExtend is the actual CDN used by canal.parlamento.pt (confirmed via
-// public IPTV repositories iptv-org/iptv and LITUATUI/M3UPT).
-// Multiple playout nodes and path variants are tried in order.
-const ARTV_HLS_CANDIDATES = [
-  // LiveExtend CDN — primary (confirmed working)
-  "https://playout172.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
-  "https://playout175.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
-  "https://playout172.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
-  "https://playout175.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
-  // Parliament own infrastructure (fallback)
-  "https://livepd3.parlamento.pt/artv/live.m3u8",
-  "https://livepd3.parlamento.pt/plenario/live.m3u8",
-  // RTP CDN (ARTV is an RTP group channel)
-  "https://streaming.rtp.pt/liverepeater/smil:artv.smil/playlist.m3u8",
-  "https://rdmedia.rtp.pt/artv/index.m3u8",
-];
 
 // ─── Demo simulation data ────────────────────────────────────────────────────
 const DEMO_EVENTS: Omit<TranscriptEvent, "id" | "created_at">[] = [
   {
-    session_id: "demo",
-    politician_id: mockPoliticians[2].id,
+    session_id: "demo", politician_id: mockPoliticians[2].id,
     text_segment: "Senhor Presidente, portanto, nós temos aqui um problema que é, digamos, bastante complexo e que, basicamente, precisa de uma solução urgente. Ou seja, não podemos continuar a ignorar estes dados.",
-    filler_count: 5, total_words: 38,
-    filler_words_found: { portanto: 1, digamos: 1, basicamente: 1, "ou seja": 1 },
+    filler_count: 5, total_words: 38, filler_words_found: { portanto: 1, digamos: 1, basicamente: 1, "ou seja": 1 },
     start_seconds: 0, duration_seconds: 28, politician: mockPoliticians[2] as any,
   },
   {
-    session_id: "demo",
-    politician_id: mockPoliticians[0].id,
+    session_id: "demo", politician_id: mockPoliticians[0].id,
     text_segment: "Portanto, quero deixar claro que esta proposta, na verdade, vai ao encontro daquilo que todos nós queremos para o país. Os dados são inequívocos e a solução é necessária.",
-    filler_count: 2, total_words: 34,
-    filler_words_found: { portanto: 1, "na verdade": 1 },
+    filler_count: 2, total_words: 34, filler_words_found: { portanto: 1, "na verdade": 1 },
     start_seconds: 30, duration_seconds: 26, politician: mockPoliticians[0] as any,
   },
   {
-    session_id: "demo",
-    politician_id: mockPoliticians[5].id,
+    session_id: "demo", politician_id: mockPoliticians[5].id,
     text_segment: "Bem, eu acho que, tipo, precisamos de olhar para isto de outra forma. Pronto, não podemos continuar a adiar decisões que são, efetivamente, urgentes e que afetam milhões de cidadãos.",
-    filler_count: 5, total_words: 36,
-    filler_words_found: { bem: 1, tipo: 1, pronto: 1, efetivamente: 1 },
+    filler_count: 5, total_words: 36, filler_words_found: { bem: 1, tipo: 1, pronto: 1, efetivamente: 1 },
     start_seconds: 58, duration_seconds: 30, politician: mockPoliticians[5] as any,
   },
   {
-    session_id: "demo",
-    politician_id: mockPoliticians[3].id,
+    session_id: "demo", politician_id: mockPoliticians[3].id,
     text_segment: "A nossa posição é clara: o mercado livre deve ser protegido e as regulamentações devem ser proporcionais aos objetivos que se pretendem alcançar. Não há alternativa responsável.",
     filler_count: 0, total_words: 32, filler_words_found: {},
     start_seconds: 90, duration_seconds: 29, politician: mockPoliticians[3] as any,
   },
   {
-    session_id: "demo",
-    politician_id: mockPoliticians[8].id,
+    session_id: "demo", politician_id: mockPoliticians[8].id,
     text_segment: "Portanto, digamos que, tipo, esta questão é, basicamente, uma questão de princípio. Portanto, nós não podemos, enfim, aceitar esta proposta de certa forma sem garantias claras.",
-    filler_count: 8, total_words: 35,
-    filler_words_found: { portanto: 2, digamos: 1, tipo: 1, basicamente: 1, enfim: 1, "de certa forma": 1 },
+    filler_count: 8, total_words: 35, filler_words_found: { portanto: 2, digamos: 1, tipo: 1, basicamente: 1, enfim: 1, "de certa forma": 1 },
     start_seconds: 121, duration_seconds: 31, politician: mockPoliticians[8] as any,
   },
 ];
@@ -80,21 +55,7 @@ interface LiveEvent extends TranscriptEvent {
   created_at: string;
 }
 
-// ─── Probe HLS candidate URLs directly from the browser ─────────────────────
-async function probeHlsCandidates(candidates: string[]): Promise<string | null> {
-  for (const url of candidates) {
-    try {
-      // Use our CORS proxy so the HEAD request succeeds cross-origin
-      const proxied = `${SUPABASE_URL}/functions/v1/hls-proxy?url=${encodeURIComponent(url)}`;
-      const r = await fetch(proxied, { method: "GET", signal: AbortSignal.timeout(5000) });
-      if (r.ok) {
-        const text = await r.text();
-        if (text.trimStart().startsWith("#EXTM3U")) return url;
-      }
-    } catch { /* try next */ }
-  }
-  return null;
-}
+type CronState = "idle" | "running" | "ok" | "waiting" | "error";
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
@@ -103,31 +64,82 @@ export default function AoVivo() {
   const [isDemoMode, setIsDemoMode]   = useState(false);
   const [demoRunning, setDemoRunning] = useState(false);
   const [demoIndex, setDemoIndex]     = useState(0);
-  const [playerStatus, setPlayerStatus] = useState<PlayerStatus>("idle");
-  const [hlsUrl, setHlsUrl]           = useState<string | null>(null);
-  const [sessionStats, setSessionStats] = useState({
-    totalFillers: 0, totalWords: 0, duration: 0, eventCount: 0,
-  });
-  const feedRef = useRef<HTMLDivElement>(null);
+  const [cronState, setCronState]     = useState<CronState>("idle");
+  const [cronMsg, setCronMsg]         = useState<string>("A iniciar captura…");
+  const [sessionStats, setSessionStats] = useState({ totalFillers: 0, totalWords: 0, duration: 0, eventCount: 0 });
+
+  const feedRef         = useRef<HTMLDivElement>(null);
   const demoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const seenIds = useRef(new Set<string>());
+  const seenIds         = useRef(new Set<string>());
+  const cronLock        = useRef(false); // prevent concurrent calls
 
   const { data: activeSession } = useActiveSession();
   const { data: existingEvents } = useTranscriptEvents(activeSession?.id);
 
-  // ── Resolve HLS URL: DB first, then probe candidates ─────────────────────
-  useEffect(() => {
-    if (activeSession?.artv_stream_url?.includes(".m3u8")) {
-      setHlsUrl(activeSession.artv_stream_url);
-      return;
-    }
-    // No URL stored yet — probe known candidates
-    probeHlsCandidates(ARTV_HLS_CANDIDATES).then((url) => {
-      if (url) setHlsUrl(url);
-    });
-  }, [activeSession?.artv_stream_url]);
+  // ── Server-side capture: call plenario-cron from the browser ─────────────
+  // plenario-cron runs in Deno Deploy (no CORS), discovers the ARTV HLS URL,
+  // downloads new segments, sends to Whisper, and inserts transcript_events.
+  // Results flow back via Supabase Realtime — no browser audio capture needed.
+  const triggerCron = useCallback(async () => {
+    if (cronLock.current) return;
+    cronLock.current = true;
+    setCronState("running");
+    setCronMsg("A descobrir stream e transcrever…");
 
-  // ── Load historical events on mount ──────────────────────────────────────
+    try {
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/plenario-cron`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: "{}",
+        signal: AbortSignal.timeout(120_000),
+      });
+
+      if (!resp.ok) {
+        setCronState("error");
+        setCronMsg(`Erro HTTP ${resp.status} — a tentar novamente em 60s`);
+        return;
+      }
+
+      const r = await resp.json() as Record<string, unknown>;
+
+      if (r.skipped) {
+        setCronState("waiting");
+        setCronMsg("Fora do horário de transmissão (08–22h Lisboa)");
+      } else if (r.waiting) {
+        setCronState("waiting");
+        setCronMsg("Parlamento não está em transmissão agora");
+      } else if (r.error) {
+        setCronState("error");
+        setCronMsg(`${r.error}`);
+      } else if ((r.new_segments as number) > 0) {
+        setCronState("ok");
+        const segs    = r.new_segments  as number;
+        const fillers = r.total_fillers as number ?? 0;
+        const words   = r.total_words   as number ?? 0;
+        setCronMsg(`✓ ${segs} segmentos · ${words} palavras · ${fillers} enchimentos detectados`);
+      } else {
+        setCronState("ok");
+        setCronMsg("✓ Em dia — sem novos segmentos (próxima verificação em 60s)");
+      }
+    } catch {
+      setCronState("error");
+      setCronMsg("Erro de ligação — a tentar novamente em 60s");
+    } finally {
+      cronLock.current = false;
+    }
+  }, []);
+
+  // Auto-trigger every 60s (also runs immediately on mount)
+  useEffect(() => {
+    triggerCron();
+    const interval = setInterval(triggerCron, 60_000);
+    return () => clearInterval(interval);
+  }, [triggerCron]);
+
+  // ── Load historical events ────────────────────────────────────────────────
   useEffect(() => {
     if (!existingEvents?.length) return;
     const fresh = existingEvents.filter(ev => ev.id && !seenIds.current.has(ev.id));
@@ -165,28 +177,7 @@ export default function AoVivo() {
 
   useTranscriptRealtime(handleNewEvent, activeSession?.id);
 
-  // ── Handle transcription results from the stream player ──────────────────
-  const handleTranscribeResult = useCallback((result: TranscribeResult) => {
-    // The `transcribe` edge function already inserted into the DB (if sessionId was passed).
-    // We inject a synthetic event locally so the feed updates instantly,
-    // before Realtime fires (typically <1s behind).
-    const fw = result.filler_words ?? {};
-    const fc = result.filler_count ?? Object.values(fw).reduce((a: number, b: number) => a + b, 0);
-    handleNewEvent({
-      id: crypto.randomUUID(),
-      session_id:         activeSession?.id ?? null,
-      politician_id:      null,
-      text_segment:       result.text,
-      filler_count:       fc,
-      total_words:        result.total_words,
-      filler_words_found: fw,
-      start_seconds:      null,
-      duration_seconds:   30,
-      created_at:         new Date().toISOString(),
-    });
-  }, [activeSession?.id, handleNewEvent]);
-
-  // ── Auto-scroll ───────────────────────────────────────────────────────────
+  // ── Auto-scroll feed ──────────────────────────────────────────────────────
   useEffect(() => {
     feedRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [events.length]);
@@ -197,7 +188,6 @@ export default function AoVivo() {
     setEvents([]); setSessionStats({ totalFillers: 0, totalWords: 0, duration: 0, eventCount: 0 });
     setDemoIndex(0);
   };
-
   useEffect(() => {
     if (!demoRunning) { demoIntervalRef.current && clearInterval(demoIntervalRef.current); return; }
     let idx = demoIndex;
@@ -210,31 +200,22 @@ export default function AoVivo() {
     demoIntervalRef.current = setInterval(inject, 6000);
     return () => { demoIntervalRef.current && clearInterval(demoIntervalRef.current); };
   }, [demoRunning]); // eslint-disable-line
-
   const stopDemo = () => { setDemoRunning(false); demoIntervalRef.current && clearInterval(demoIntervalRef.current); };
 
   // ── Derived state ─────────────────────────────────────────────────────────
-  const isCapturing  = playerStatus === "capturing" || playerStatus === "playing";
-  const isLive       = isCapturing || !!activeSession || demoRunning;
-  const fillerRate   = sessionStats.totalWords > 0 ? sessionStats.totalFillers / sessionStats.totalWords : 0;
-  const grade        = gradeFillerRate(fillerRate);
+  const isCapturing   = cronState === "running";
+  const isLive        = isCapturing || !!activeSession || demoRunning;
+  const fillerRate    = sessionStats.totalWords > 0 ? sessionStats.totalFillers / sessionStats.totalWords : 0;
+  const grade         = gradeFillerRate(fillerRate);
   const currentSpeaker = events[0]?.politician ?? null;
 
-  const statusLabel = {
-    idle:      "PARADO",
-    loading:   "A LIGAR…",
-    playing:   "AO VIVO",
-    capturing: "A CAPTURAR",
-    error:     "ERRO",
-  }[playerStatus];
-
-  const statusColor = {
-    idle:      "text-muted-foreground",
-    loading:   "text-amber-400",
-    playing:   "text-green-400",
-    capturing: "text-primary",
-    error:     "text-red-400",
-  }[playerStatus];
+  const cronStatusIcon = {
+    idle:    <Wifi className="h-3.5 w-3.5 text-muted-foreground" />,
+    running: <Wifi className="h-3.5 w-3.5 text-primary animate-pulse" />,
+    ok:      <CheckCircle2 className="h-3.5 w-3.5 text-green-400" />,
+    waiting: <Clock className="h-3.5 w-3.5 text-amber-400" />,
+    error:   <AlertCircle className="h-3.5 w-3.5 text-red-400" />,
+  }[cronState];
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -245,15 +226,21 @@ export default function AoVivo() {
         <div>
           <div className="flex items-center gap-2 mb-1">
             <h1 className="text-3xl sm:text-4xl font-bold">Plenário Ao Vivo</h1>
-            {isLive && (
-              <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/15 border border-red-500/30 text-xs font-semibold ${isDemoMode ? "text-amber-400" : "text-red-400"}`}>
+            {(isLive || isDemoMode) && (
+              <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
+                isDemoMode
+                  ? "bg-amber-500/15 border border-amber-500/30 text-amber-400"
+                  : isCapturing
+                  ? "bg-primary/15 border border-primary/30 text-primary"
+                  : "bg-red-500/15 border border-red-500/30 text-red-400"
+              }`}>
                 <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
-                {isDemoMode ? "DEMO" : statusLabel}
+                {isDemoMode ? "DEMO" : isCapturing ? "A CAPTURAR" : "AO VIVO"}
               </span>
             )}
           </div>
           <p className="text-muted-foreground">
-            Stream direto da ARTV · captura de áudio automática · transcrição por IA
+            Stream direto da ARTV · transcrição automática por IA · detecção de enchimentos
           </p>
         </div>
 
@@ -267,7 +254,7 @@ export default function AoVivo() {
               <WifiOff className="h-4 w-4" /> Parar Demo
             </Button>
           )}
-          <a href="https://canal.parlamento.pt/plenario" target="_blank" rel="noopener noreferrer">
+          <a href="https://canal.parlamento.pt" target="_blank" rel="noopener noreferrer">
             <Button variant="outline" className="gap-2">
               <ExternalLink className="h-4 w-4" /> ARTV
             </Button>
@@ -276,67 +263,63 @@ export default function AoVivo() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* ─ Left column: player + feed ──────────────────────────────────── */}
+        {/* ─ Left column ─────────────────────────────────────────────────── */}
         <div className="lg:col-span-2 space-y-4">
 
-          {/* Embedded stream player */}
+          {/* ── Video + capture panel ─────────────────────────────────────── */}
           <div className="glass-card rounded-xl overflow-hidden">
+            {/* Title bar */}
             <div className="flex items-center justify-between px-4 py-2 border-b border-border/40">
               <div className="flex items-center gap-2">
                 <Tv2 className="h-4 w-4 text-primary" />
-                <span className="text-sm font-medium">Canal Parlamento — Plenário</span>
+                <span className="text-sm font-medium">Canal Parlamento — Ao Vivo</span>
               </div>
-              <div className={`flex items-center gap-1.5 text-xs font-semibold ${statusColor}`}>
-                {isCapturing ? (
-                  <Wifi className="h-3.5 w-3.5 animate-pulse" />
-                ) : (
-                  <WifiOff className="h-3.5 w-3.5" />
-                )}
-                {statusLabel}
+              <div className="flex items-center gap-2">
+                <span className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground max-w-[260px] truncate">
+                  {cronStatusIcon}
+                  {cronMsg}
+                </span>
+                <Button
+                  size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+                  onClick={triggerCron} disabled={isCapturing}
+                >
+                  {isCapturing
+                    ? <><Wifi className="h-3.5 w-3.5 animate-pulse" /> A capturar…</>
+                    : <><RefreshCw className="h-3.5 w-3.5" /> Capturar agora</>
+                  }
+                </Button>
               </div>
             </div>
 
-            <LiveStreamPlayer
-              hlsUrl={hlsUrl}
-              sessionId={activeSession?.id ?? null}
-              supabaseUrl={SUPABASE_URL}
-              anonKey={SUPABASE_ANON_KEY}
-              onResult={handleTranscribeResult}
-              onStatus={setPlayerStatus}
-            />
+            {/* Embedded parliament player (iframe — no HLS/CORS issues) */}
+            <div className="relative bg-black" style={{ paddingTop: "56.25%" }}>
+              <iframe
+                src="https://canal.parlamento.pt/arplayer"
+                className="absolute inset-0 w-full h-full border-0"
+                allow="autoplay; fullscreen; picture-in-picture"
+                allowFullScreen
+                title="Canal Parlamento ao vivo"
+              />
+            </div>
 
-            {/* Capture status bar */}
+            {/* Status bar */}
             <div className="px-4 py-2 text-xs text-muted-foreground flex items-center justify-between border-t border-border/40">
               <span>
-                {playerStatus === "idle" && "Carrega Play para iniciar a captura de áudio"}
-                {playerStatus === "loading" && "A carregar stream…"}
-                {playerStatus === "playing" && "Stream ativo · a acumular áudio para transcrição…"}
-                {playerStatus === "capturing" && "A enviar chunk de 30s para Whisper…"}
-                {playerStatus === "error" && "Erro a ligar ao stream. O parlamento pode não estar em sessão."}
+                {isCapturing
+                  ? "A descarregar segmentos · a transcrever com Whisper large-v3…"
+                  : "Captura automática a cada 60 s · primeiros resultados em ~30–60 s"}
               </span>
-              {hlsUrl && (
-                <span className="opacity-50 truncate max-w-[200px]" title={hlsUrl}>
-                  {new URL(hlsUrl).hostname}
-                </span>
-              )}
+              <a
+                href="https://canal.parlamento.pt"
+                target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1 hover:text-primary transition-colors shrink-0 ml-2"
+              >
+                <ExternalLink className="h-3 w-3" /> canal.parlamento.pt
+              </a>
             </div>
           </div>
 
-          {/* No stream warning */}
-          {!hlsUrl && playerStatus !== "loading" && (
-            <div className="glass-card rounded-xl p-4 border-amber-500/20 bg-amber-500/5 flex items-start gap-3">
-              <AlertCircle className="h-4 w-4 text-amber-400 mt-0.5 shrink-0" />
-              <div className="text-sm">
-                <p className="font-semibold text-amber-300">Stream não encontrado</p>
-                <p className="text-muted-foreground mt-0.5">
-                  O parlamento pode não estar em sessão, ou o URL do stream ainda não foi descoberto.
-                  O cron (<code>plenario-cron</code>) actualiza o URL automaticamente quando a sessão começa.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Current speaker */}
+          {/* ── Current speaker ───────────────────────────────────────────── */}
           {currentSpeaker && (
             <motion.div
               key={currentSpeaker.id}
@@ -353,9 +336,7 @@ export default function AoVivo() {
                 </Avatar>
                 <div>
                   <p className="font-semibold text-lg leading-tight">{currentSpeaker.name}</p>
-                  <p className="text-sm" style={{ color: PARTY_COLORS[currentSpeaker.party] }}>
-                    {currentSpeaker.party}
-                  </p>
+                  <p className="text-sm" style={{ color: PARTY_COLORS[currentSpeaker.party] }}>{currentSpeaker.party}</p>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5 text-primary">
                   <Radio className="h-4 w-4 animate-pulse" />
@@ -365,14 +346,16 @@ export default function AoVivo() {
             </motion.div>
           )}
 
-          {/* Transcript feed */}
+          {/* ── Transcript feed ───────────────────────────────────────────── */}
           <div ref={feedRef} className="space-y-3 max-h-[500px] overflow-y-auto pr-1" style={{ scrollbarWidth: "thin" }}>
             <AnimatePresence initial={false}>
               {events.length === 0 && (
                 <div className="glass-card rounded-xl p-10 text-center text-muted-foreground">
                   <Radio className="h-8 w-8 mx-auto mb-3 opacity-40" />
                   <p>À espera de transcrições…</p>
-                  <p className="text-xs mt-2 opacity-60">O Whisper processa chunks de 30s — os primeiros resultados aparecem em ~30–60s</p>
+                  <p className="text-xs mt-2 opacity-60">
+                    O Whisper processa chunks de 30 s — os primeiros resultados aparecem em ~30–60 s
+                  </p>
                 </div>
               )}
               {events.map((ev, i) => <TranscriptBlock key={ev.id} event={ev} isNewest={i === 0} />)}
@@ -420,11 +403,11 @@ export default function AoVivo() {
           <div className="glass-card rounded-xl p-5">
             <h3 className="font-semibold mb-2 text-sm">Como funciona</h3>
             <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside">
-              <li>Stream ARTV carregado via <strong>hls.js</strong></li>
-              <li><code>captureStream()</code> capta áudio do vídeo</li>
-              <li><strong>AudioContext</strong> acumula 30s de PCM a 16 kHz</li>
-              <li>WAV enviado ao <strong>Whisper</strong> via edge function</li>
-              <li>Enchimentos detectados e exibidos em tempo real</li>
+              <li>Stream ARTV via <strong>Canal Parlamento</strong> (iframe)</li>
+              <li>Captura automática a cada <strong>60 s</strong> pelo servidor</li>
+              <li>Segmentos HLS descarregados e transcribed com <strong>Whisper</strong></li>
+              <li>Enchimentos detectados e pontuados por categoria</li>
+              <li>Resultados em tempo real via <strong>Supabase Realtime</strong></li>
             </ol>
           </div>
         </div>
@@ -436,7 +419,7 @@ export default function AoVivo() {
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
 function TranscriptBlock({ event, isNewest }: { event: LiveEvent; isNewest: boolean }) {
-  const segments  = segmentTranscript(event.text_segment);
+  const segments    = segmentTranscript(event.text_segment);
   const fillerRatio = event.total_words > 0 ? event.filler_count / event.total_words : 0;
   const politician  = event.politician;
 
