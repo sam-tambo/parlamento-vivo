@@ -14,13 +14,22 @@ import LiveStreamPlayer, { type PlayerStatus, type TranscribeResult } from "@/co
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
 
-// ─── Known ARTV HLS URL candidates (same list as plenario-cron) ──────────────
-// Tried in order; the first that resolves a working stream is used.
+// ─── Known ARTV HLS URL candidates ───────────────────────────────────────────
+// LiveExtend is the actual CDN used by canal.parlamento.pt (confirmed via
+// public IPTV repositories iptv-org/iptv and LITUATUI/M3UPT).
+// Multiple playout nodes and path variants are tried in order.
 const ARTV_HLS_CANDIDATES = [
+  // LiveExtend CDN — primary (confirmed working)
+  "https://playout172.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  "https://playout175.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
+  "https://playout172.livextend.cloud/livenlin4/_definst_/2liveartvpub2/playlist.m3u8",
+  "https://playout175.livextend.cloud/liveiframe/_definst_/liveartvabr/playlist.m3u8",
+  // Parliament own infrastructure (fallback)
   "https://livepd3.parlamento.pt/artv/live.m3u8",
   "https://livepd3.parlamento.pt/plenario/live.m3u8",
+  // RTP CDN (ARTV is an RTP group channel)
   "https://streaming.rtp.pt/liverepeater/smil:artv.smil/playlist.m3u8",
-  "https://livepd3.parlamento.pt/canal/live.m3u8",
+  "https://rdmedia.rtp.pt/artv/index.m3u8",
 ];
 
 // ─── Demo simulation data ────────────────────────────────────────────────────
