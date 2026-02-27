@@ -103,6 +103,48 @@ async function probeHls(url: string, timeoutMs = 8000): Promise<string | null> {
   } catch { return null; }
 }
 
+/**
+ * Stage B.5: fetch actively-maintained public IPTV playlists.
+ * iptv-org/iptv and LITUATUI/M3UPT are community-curated and updated
+ * whenever streams change — far more reliable than any URL we can guess.
+ */
+async function discoverFromIptvPlaylist(): Promise<string | null> {
+  const playlists = [
+    // iptv-org/iptv — largest public IPTV repo, Portugal streams
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/pt.m3u",
+    // LITUATUI/M3UPT — Portuguese-specific, actively maintained
+    "https://raw.githubusercontent.com/LITUATUI/M3UPT/main/M3U/M3UPT.m3u8",
+  ];
+
+  for (const playlistUrl of playlists) {
+    try {
+      const r = await fetch(playlistUrl, { signal: AbortSignal.timeout(12000) });
+      if (!r.ok) continue;
+      const text = await r.text();
+      const lines = text.split("\n");
+
+      for (let i = 0; i < lines.length - 1; i++) {
+        const meta = lines[i];
+        // Look for ARTV / Canal Parlamento entry in EXTINF metadata line
+        if (!/artv|parlamento/i.test(meta)) continue;
+        // The URL is on the next non-empty line
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const url = lines[j].trim();
+          if (!url || url.startsWith("#")) continue;
+          if (!url.startsWith("http")) continue;
+          const valid = await probeHls(url, 10000);
+          if (valid) {
+            console.log(`[cron] IPTV playlist hit (${playlistUrl}): ${url}`);
+            return url;
+          }
+          break; // URL line found but not valid — move to next EXTINF
+        }
+      }
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
 /** Stage B: try JSON API endpoints for a stream URL */
 async function discoverFromApi(): Promise<string | null> {
   for (const endpoint of API_ENDPOINTS) {
@@ -192,7 +234,11 @@ async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
     console.warn("[cron] Cached HLS URL expired, re-discovering…");
   }
 
-  // B. JSON API probes (fast, no HTML parsing needed)
+  // B. IPTV playlist (community-maintained, most reliable external source)
+  const iptvUrl = await discoverFromIptvPlaylist();
+  if (iptvUrl) return iptvUrl;
+
+  // B2. JSON API probes (fast, no HTML parsing needed)
   const apiUrl = await discoverFromApi();
   if (apiUrl) return apiUrl;
 
