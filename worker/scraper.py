@@ -11,9 +11,12 @@ Usage (standalone):
 """
 
 import json
+import os
 import re
+import subprocess
 import sys
 import time
+import urllib.request
 from typing import Optional
 
 try:
@@ -244,12 +247,106 @@ def _sessions_from_dom(page: "Page", limit: int) -> list[dict]:
     return results[:limit]
 
 
+# ─── HLS live stream discovery ───────────────────────────────────────────────
+
+def get_live_hls_url() -> str | None:
+    """
+    Try to extract the HLS .m3u8 URL for the ARTV Plenário live stream.
+
+    Strategy:
+      1. streamlink  — fastest, handles most live streams
+      2. yt-dlp      — broad format support
+      3. Playwright  — inspect video element src attribute on the live page
+
+    Returns the HLS URL string, or None if not found.
+    """
+    for tool, args in [
+        ("streamlink", ["streamlink", "--stream-url", PLENARIO_URL, "best"]),
+        ("yt-dlp",     ["yt-dlp", "-f", "best", "--get-url", PLENARIO_URL]),
+    ]:
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=45)
+            url = r.stdout.strip()
+            if url.startswith("http") and (".m3u8" in url or "stream" in url):
+                print(f"[scraper] Live HLS via {tool}: {url[:80]}…")
+                return url
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"[scraper] {tool} error: {e}")
+
+    # Playwright fallback: check video element src
+    if PLAYWRIGHT_AVAILABLE:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(PLENARIO_URL, wait_until="networkidle", timeout=30_000)
+                src = page.evaluate(
+                    "() => {"
+                    "  const v = document.querySelector('video source, video');"
+                    "  return v ? (v.src || v.getAttribute('src')) : null;"
+                    "}"
+                )
+                browser.close()
+                if src and src.startswith("http"):
+                    print(f"[scraper] Live HLS via DOM: {src[:80]}…")
+                    return src
+        except Exception as e:
+            print(f"[scraper] Playwright HLS discovery error: {e}")
+
+    return None
+
+
+def register_hls_url_in_supabase(session_id: str, hls_url: str):
+    """
+    Store the discovered HLS URL in the sessions table so the edge function
+    (plenario-cron) can use it without needing a browser.
+    """
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    service_key  = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    if not supabase_url or not service_key:
+        print("[scraper] SUPABASE_URL/SERVICE_KEY not set — skipping Supabase update")
+        return
+
+    body = json.dumps({"artv_stream_url": hls_url, "transcript_status": "processing"}).encode()
+    url  = f"{supabase_url}/rest/v1/sessions?id=eq.{session_id}"
+    req  = urllib.request.Request(url, data=body, method="PATCH", headers={
+        "apikey":        service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            print(f"[scraper] HLS URL stored in Supabase for session {session_id}")
+    except Exception as e:
+        print(f"[scraper] Supabase update error: {e}")
+
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    limit = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-    sessions = get_latest_session_urls(limit)
-    print(f"\n{'URL':<80} {'DATE':<12} TITLE")
-    print("-" * 120)
-    for s in sessions:
-        print(f"{s['url']:<80} {s['date']:<12} {s['title'][:30]}")
+    import argparse
+    parser = argparse.ArgumentParser(description="ARTV Plenário scraper")
+    parser.add_argument("command", nargs="?", default="sessions",
+                        choices=["sessions", "hls"],
+                        help="sessions=list archive URLs  hls=find live HLS URL")
+    parser.add_argument("limit", nargs="?", type=int, default=20,
+                        help="Max number of sessions to return (sessions mode)")
+    args = parser.parse_args()
+
+    if args.command == "hls":
+        url = get_live_hls_url()
+        if url:
+            print(f"\nLive HLS URL:\n  {url}")
+            print("\nTo register in Supabase, set SUPABASE_URL and SUPABASE_SERVICE_KEY,")
+            print("then run: python scraper.py hls  (it will update automatically)")
+        else:
+            print("Could not discover live HLS URL. Is parliament in session?")
+    else:
+        sessions = get_latest_session_urls(args.limit)
+        print(f"\n{'URL':<80} {'DATE':<12} TITLE")
+        print("-" * 120)
+        for s in sessions:
+            print(f"{s['url']:<80} {s['date']:<12} {s['title'][:30]}")
