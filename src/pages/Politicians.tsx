@@ -8,7 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
-import { usePoliticians } from "@/lib/queries";
+import { usePoliticians, useRefreshPoliticianStats } from "@/lib/queries";
 import { gradeFillerRate } from "@/lib/filler-words";
 import { PARTIES, PARTY_COLORS } from "@/lib/mock-data";
 
@@ -22,6 +22,9 @@ const tooltipStyle = {
 export default function Politicians() {
   const [selectedParty, setSelectedParty] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("filler");
+
+  // Accumulate politician stats from transcript_events every time this page loads.
+  useRefreshPoliticianStats();
 
   const { data: politicians = [], isLoading } = usePoliticians();
 

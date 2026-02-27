@@ -267,6 +267,30 @@ export function useTopFillerWords() {
   });
 }
 
+/**
+ * Refreshes aggregated politician stats from transcript_events.
+ * Called automatically on page load for recordings/politician pages.
+ * The DB trigger keeps stats live for new inserts — this RPC catches up
+ * any backlog (e.g. events inserted before the trigger existed).
+ * staleTime of 5 min ensures we don't hammer the DB on every render.
+ */
+export function useRefreshPoliticianStats() {
+  return useQuery({
+    queryKey: ["refresh_politician_stats"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("refresh_all_politician_stats");
+      if (error) {
+        // Non-fatal: stats will still be correct for new events via the trigger
+        console.warn("[stats] refresh_all_politician_stats:", error.message);
+        return null;
+      }
+      return data as { refreshed_politicians: number; refreshed_at: string } | null;
+    },
+    staleTime: 5 * 60_000,      // run at most once per 5 minutes per tab
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useFillerTrend() {
   return useQuery({
     queryKey: ["filler_trend"],
