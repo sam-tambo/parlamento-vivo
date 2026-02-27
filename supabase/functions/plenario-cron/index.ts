@@ -296,6 +296,73 @@ async function findArtvHlsUrl(stored: string | null): Promise<string | null> {
   return null;
 }
 
+// ─── Speaker identification ───────────────────────────────────────────────────
+
+type SupabaseClient = ReturnType<typeof createClient>;
+
+/**
+ * Try to discover who is currently speaking by probing canal.parlamento.pt
+ * API endpoints that may expose live session / agenda data.
+ *
+ * Returns the matching politician's UUID (from our DB), or null.
+ * This is a best-effort hint: transcribe will fall back to text extraction
+ * if we return null here.
+ */
+async function fetchCurrentSpeaker(
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  // Endpoints that may expose current speaker info
+  const endpoints = [
+    "https://canal.parlamento.pt/api/lives",
+    "https://canal.parlamento.pt/api/lives/plenario",
+    "https://canal.parlamento.pt/api/player/live",
+    "https://canal.parlamento.pt/api/sessions/current",
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const r = await fetch(ep, {
+        headers: { ...BROWSER_HEADERS, Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) continue;
+      const ct = r.headers.get("content-type") ?? "";
+      if (!ct.includes("json")) continue;
+
+      const data = await r.json();
+      const json = JSON.stringify(data);
+
+      // Extract value of any speaker-ish field
+      const m = json.match(
+        /"(?:speaker|orador|interveniente|deputado|author|nome|name)"\s*:\s*"([^"]{3,})"/i,
+      );
+      if (!m) continue;
+
+      const speakerName = m[1].trim();
+      if (!speakerName) continue;
+
+      console.log(`[cron] API speaker hint: "${speakerName}" (from ${ep})`);
+
+      // Fuzzy match against politicians (name / full_name)
+      const words = speakerName.split(/\s+/).filter((w: string) => w.length > 3);
+      for (const word of words) {
+        const { data: pol } = await supabase
+          .from("politicians")
+          .select("id, name")
+          .or(`name.ilike.%${word}%,full_name.ilike.%${word}%`)
+          .limit(1)
+          .single();
+        if (pol) {
+          console.log(`[cron] Matched politician: ${pol.name}`);
+          return pol.id as string;
+        }
+      }
+    } catch { /* try next endpoint */ }
+  }
+
+  return null;
+}
+
 // ─── HLS playlist helpers ─────────────────────────────────────────────────────
 
 interface HlsPlaylist {
@@ -458,15 +525,28 @@ Deno.serve(async (req: Request) => {
 
   console.log(`[cron] ${newSegments.length} new segments to transcribe`);
 
+  // ── Identify current speaker (best-effort, doesn't block if null) ─────────
+  const currentSpeakerId = await fetchCurrentSpeaker(supabase);
+  if (currentSpeakerId) {
+    console.log(`[cron] Current speaker hint: ${currentSpeakerId}`);
+  }
+
   // ── Send to transcribe in ~30s batches ────────────────────────────────────
   let totalWords = 0, totalFillers = 0, chunksOk = 0;
 
   for (let i = 0; i < newSegments.length; i += SEGMENTS_PER_CHUNK) {
     const batch = newSegments.slice(i, i + SEGMENTS_PER_CHUNK);
     try {
+      const transcribeHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${SERVICE_KEY}`,
+        "x-session-id": session.id,
+      };
+      if (currentSpeakerId) transcribeHeaders["x-politician-id"] = currentSpeakerId;
+
       const resp = await fetch(`${FUNCTIONS_URL}/transcribe`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SERVICE_KEY}`, "x-session-id": session.id },
+        headers: transcribeHeaders,
         body: JSON.stringify({ segment_urls: batch, m3u8_url: mediaUrl }),
         signal: AbortSignal.timeout(120_000),
       });

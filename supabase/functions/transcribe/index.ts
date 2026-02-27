@@ -163,6 +163,65 @@ async function fetchHLSChunk(
   return out;
 }
 
+// ─── Speaker identification ───────────────────────────────────────────────────
+
+type SupabaseClient = ReturnType<typeof createClient>;
+
+/**
+ * Try to identify the speaker from the transcribed text.
+ *
+ * Whisper often captures Portuguese parliamentary address forms in the audio:
+ *   "A Sr.ª NOME tem a palavra"
+ *   "O Deputado NOME diz que…"
+ *   "Ministra NOME, …"
+ *
+ * Extract candidate names from these patterns and fuzzy-match against the
+ * `politicians` table (both `name` and `full_name` columns).
+ *
+ * Returns the matching politician's UUID, or null if none found.
+ */
+async function identifySpeakerFromText(
+  text: string,
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  // Patterns common in Portuguese parliamentary audio
+  const patterns = [
+    // "O Sr. / A Sr.ª / A Sra. Nome" — most common in plenary
+    /(?:O\s+Sr\.|A\s+Sr[aª]\.|A\s+Sra\.|O\s+Senhor|A\s+Senhora)\s+([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+(?:\s+(?:de\s+|da\s+|do\s+)?[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+)*)/g,
+    // "Deputad[ao] Nome" / "Ministr[ao] Nome" / "Secretári[ao] Nome"
+    /(?:Deputad[ao]|Ministr[ao]|Secretári[ao]|Presidente)\s+([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+(?:\s+[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+)*)/g,
+  ];
+
+  const candidates = new Set<string>();
+  for (const re of patterns) {
+    for (const m of text.matchAll(re)) {
+      const name = m[1]?.trim();
+      if (name && name.length > 3) candidates.add(name);
+    }
+  }
+
+  if (!candidates.size) return null;
+
+  for (const candidate of candidates) {
+    // Try each significant word (>3 chars) as a sub-string match
+    const words = candidate.split(/\s+/).filter((w) => w.length > 3);
+    for (const word of words) {
+      const { data } = await supabase
+        .from("politicians")
+        .select("id, name")
+        .or(`name.ilike.%${word}%,full_name.ilike.%${word}%`)
+        .limit(1)
+        .single();
+      if (data) {
+        console.log(`[transcribe] Speaker from text: "${data.name}" (matched "${word}")`);
+        return data.id as string;
+      }
+    }
+  }
+
+  return null;
+}
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 const CORS_HEADERS = {
@@ -251,11 +310,20 @@ Deno.serve(async (req: Request) => {
       `(${((fillerCount / Math.max(totalWords, 1)) * 100).toFixed(1)}%)`
     );
 
+    // ── Resolve politician: header hint → text extraction → null ────────────
+    let resolvedPoliticianId: string | null = politicianId;
+    if (!resolvedPoliticianId && text) {
+      resolvedPoliticianId = await identifySpeakerFromText(text, supabase);
+    }
+    if (resolvedPoliticianId) {
+      console.log(`[transcribe] Attributed to politician ${resolvedPoliticianId}`);
+    }
+
     // ── Persist to transcript_events ────────────────────────────────────────
     if (sessionId) {
       const { error } = await supabase.from("transcript_events").insert({
         session_id:         sessionId,
-        politician_id:      politicianId,
+        politician_id:      resolvedPoliticianId,
         text_segment:       text,
         filler_count:       fillerCount,
         total_words:        totalWords,
