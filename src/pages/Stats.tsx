@@ -1,33 +1,65 @@
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LineChart, Line } from "recharts";
-import { mockFillerRankByParty, mockSpeakingByParty, mockFillerTrend, mockTopFillerWords, mockPoliticians, PARTY_COLORS } from "@/lib/mock-data";
 import { motion } from "framer-motion";
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
+  CartesianGrid, PieChart, Pie, AreaChart, Area,
+} from "recharts";
+import {
+  usePartyStats,
+  useFillerTrend,
+  usePoliticians,
+  useTopFillerWords,
+} from "@/lib/queries";
+import { PARTY_COLORS } from "@/lib/mock-data";
+import { CATEGORY_COLORS, CATEGORY_LABELS, FILLER_CATALOG, gradeFillerRate } from "@/lib/filler-words";
 
-const Stats = () => {
-  const totalFillers = mockPoliticians.reduce((s, p) => s + p.total_filler_count, 0);
-  const totalSpeeches = mockPoliticians.reduce((s, p) => s + p.total_speeches, 0);
-  const totalMinutes = Math.round(mockPoliticians.reduce((s, p) => s + p.total_speaking_seconds, 0) / 60);
-  const activePols = mockPoliticians.filter(p => p.total_speeches > 0);
-  const silentPols = mockPoliticians.filter(p => p.total_speeches === 0);
-  const avgRatio = activePols.length > 0
-    ? (activePols.reduce((s, p) => s + p.average_filler_ratio, 0) / activePols.length * 100).toFixed(1)
+const tooltipStyle = {
+  contentStyle: {
+    backgroundColor: "hsl(222 40% 10%)",
+    border: "1px solid hsl(222 25% 18%)",
+    borderRadius: "8px",
+    fontSize: 12,
+  },
+  labelStyle: { color: "hsl(45 30% 92%)" },
+};
+
+export default function Stats() {
+  const { data: politicians = [] } = usePoliticians();
+  const { data: partyStats } = usePartyStats();
+  const { data: trend = [] } = useFillerTrend();
+  const { data: topWords = [] } = useTopFillerWords();
+
+  const active = politicians.filter(p => p.total_speeches > 0);
+  const silent = politicians.filter(p => p.total_speeches === 0);
+
+  const totalFillers = politicians.reduce((s, p) => s + p.total_filler_count, 0);
+  const totalSpeeches = politicians.reduce((s, p) => s + p.total_speeches, 0);
+  const totalMinutes = Math.round(politicians.reduce((s, p) => s + p.total_speaking_seconds, 0) / 60);
+  const avgRatio = active.length > 0
+    ? (active.reduce((s, p) => s + p.average_filler_ratio, 0) / active.length * 100).toFixed(1)
     : "0";
+  const grade = gradeFillerRate(parseFloat(avgRatio) / 100);
+
+  const categories = (["hesitation", "connector", "filler", "staller"] as const).map(cat => ({
+    name: CATEGORY_LABELS[cat],
+    value: FILLER_CATALOG.filter(f => f.category === cat).length,
+    fill: CATEGORY_COLORS[cat],
+  }));
+
+  const { fillerByParty = [], speakingByParty = [] } = partyStats ?? {};
 
   const statsCards = [
-    { label: "Total de enchimentos", value: totalFillers },
+    { label: "Total enchimentos",    value: totalFillers  },
     { label: "Discursos analisados", value: totalSpeeches },
-    { label: "Minutos de discurso", value: totalMinutes },
-    { label: "Rácio médio de enchim.", value: `${avgRatio}%` },
+    { label: "Minutos de discurso",  value: totalMinutes  },
+    { label: "Rácio médio",          value: `${avgRatio}%`, colorOverride: grade.color },
   ];
-
-  const tooltipStyle = {
-    contentStyle: { backgroundColor: "hsl(222 40% 10%)", border: "1px solid hsl(222 25% 18%)", borderRadius: "8px" },
-    labelStyle: { color: "hsl(45 30% 92%)" },
-  };
 
   return (
     <div className="container py-8 sm:py-12">
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Estatísticas</h1>
-      <p className="text-muted-foreground mb-8">Dados agregados sobre a qualidade do discurso parlamentar.</p>
+      <p className="text-muted-foreground mb-8">
+        Dados agregados sobre a qualidade do discurso parlamentar português.
+      </p>
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
@@ -39,37 +71,84 @@ const Stats = () => {
             transition={{ delay: i * 0.1 }}
             className="glass-card rounded-xl p-5"
           >
-            <p className="text-2xl sm:text-3xl font-bold text-gradient-gold font-mono">{card.value}</p>
+            <p
+              className="text-2xl sm:text-3xl font-bold font-mono text-gradient-gold"
+              style={card.colorOverride ? { color: card.colorOverride, backgroundImage: "none" } : undefined}
+            >
+              {card.value}
+            </p>
             <p className="text-xs text-muted-foreground mt-1">{card.label}</p>
           </motion.div>
         ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
         {/* Filler trend */}
         <div className="glass-card rounded-xl p-6">
-          <h3 className="font-semibold mb-4">Rácio de enchimento por dia</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <LineChart data={mockFillerTrend}>
-              <XAxis dataKey="date" stroke="hsl(220 15% 55%)" fontSize={12} />
-              <YAxis stroke="hsl(220 15% 55%)" fontSize={12} unit="%" />
+          <h3 className="font-semibold mb-1">Rácio de enchimento ao longo do tempo</h3>
+          <p className="text-xs text-muted-foreground mb-4">% por sessão · meta &lt;5%</p>
+          <ResponsiveContainer width="100%" height={240}>
+            <AreaChart data={trend}>
+              <defs>
+                <linearGradient id="gradFiller" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="hsl(45 80% 55%)" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="hsl(45 80% 55%)" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 15% 18%)" />
+              <XAxis dataKey="date" stroke="hsl(220 15% 55%)" fontSize={11} />
+              <YAxis stroke="hsl(220 15% 55%)" fontSize={11} unit="%" />
+              <Tooltip {...tooltipStyle} formatter={(v: number) => [`${Number(v).toFixed(2)}%`, "Rácio"]} />
+              <Area
+                type="monotone"
+                dataKey="fillerRatio"
+                stroke="hsl(45 80% 55%)"
+                fill="url(#gradFiller)"
+                strokeWidth={2}
+                dot={{ fill: "hsl(45 80% 55%)", r: 3 }}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Category distribution pie */}
+        <div className="glass-card rounded-xl p-6">
+          <h3 className="font-semibold mb-1">Palavras monitorizadas por categoria</h3>
+          <p className="text-xs text-muted-foreground mb-4">Distribuição do catálogo de enchimentos</p>
+          <ResponsiveContainer width="100%" height={240}>
+            <PieChart>
+              <Pie
+                data={categories}
+                dataKey="value"
+                nameKey="name"
+                cx="50%"
+                cy="50%"
+                outerRadius={90}
+                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                labelLine={false}
+                fontSize={11}
+              >
+                {categories.map((entry, i) => (
+                  <Cell key={i} fill={entry.fill} />
+                ))}
+              </Pie>
               <Tooltip {...tooltipStyle} />
-              <Line type="monotone" dataKey="fillerRatio" stroke="hsl(45 80% 55%)" strokeWidth={2} dot={{ fill: "hsl(45 80% 55%)" }} />
-            </LineChart>
+            </PieChart>
           </ResponsiveContainer>
         </div>
 
         {/* Filler by party */}
         <div className="glass-card rounded-xl p-6">
           <h3 className="font-semibold mb-4">Rácio de enchimento por partido</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={mockFillerRankByParty} layout="vertical">
-              <XAxis type="number" stroke="hsl(220 15% 55%)" fontSize={12} unit="%" />
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={fillerByParty} layout="vertical">
+              <XAxis type="number" stroke="hsl(220 15% 55%)" fontSize={11} unit="%" />
               <YAxis type="category" dataKey="party" stroke="hsl(220 15% 55%)" fontSize={12} width={40} />
-              <Tooltip {...tooltipStyle} />
+              <Tooltip {...tooltipStyle} formatter={(v: number) => [`${Number(v).toFixed(1)}%`, "Média"]} />
               <Bar dataKey="avgFillerRatio" radius={[0, 4, 4, 0]}>
-                {mockFillerRankByParty.map((entry) => (
-                  <Cell key={entry.party} fill={PARTY_COLORS[entry.party] || "hsl(45 80% 55%)"} />
+                {fillerByParty.map(entry => (
+                  <Cell key={entry.party} fill={PARTY_COLORS[entry.party] ?? "hsl(45 80% 55%)"} />
                 ))}
               </Bar>
             </BarChart>
@@ -79,12 +158,17 @@ const Stats = () => {
         {/* Top filler words */}
         <div className="glass-card rounded-xl p-6">
           <h3 className="font-semibold mb-4">Palavras de enchimento mais usadas</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={mockTopFillerWords} layout="vertical">
-              <XAxis type="number" stroke="hsl(220 15% 55%)" fontSize={12} />
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={topWords.slice(0, 10)} layout="vertical">
+              <XAxis type="number" stroke="hsl(220 15% 55%)" fontSize={11} />
               <YAxis type="category" dataKey="word" stroke="hsl(220 15% 55%)" fontSize={11} width={90} />
               <Tooltip {...tooltipStyle} />
-              <Bar dataKey="count" fill="hsl(45 80% 55%)" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                {topWords.slice(0, 10).map((w, i) => {
+                  const cat = FILLER_CATALOG.find(f => f.word === w.word)?.category ?? "filler";
+                  return <Cell key={i} fill={CATEGORY_COLORS[cat]} />;
+                })}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -92,55 +176,66 @@ const Stats = () => {
         {/* Speaking time by party */}
         <div className="glass-card rounded-xl p-6">
           <h3 className="font-semibold mb-4">Tempo de discurso por partido (min)</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={mockSpeakingByParty} layout="vertical">
-              <XAxis type="number" stroke="hsl(220 15% 55%)" fontSize={12} />
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={speakingByParty} layout="vertical">
+              <XAxis type="number" stroke="hsl(220 15% 55%)" fontSize={11} />
               <YAxis type="category" dataKey="party" stroke="hsl(220 15% 55%)" fontSize={12} width={40} />
               <Tooltip {...tooltipStyle} />
               <Bar dataKey="totalMinutes" radius={[0, 4, 4, 0]}>
-                {mockSpeakingByParty.map((entry) => (
-                  <Cell key={entry.party} fill={PARTY_COLORS[entry.party] || "hsl(45 80% 55%)"} />
+                {speakingByParty.map(entry => (
+                  <Cell key={entry.party} fill={PARTY_COLORS[entry.party] ?? "hsl(45 80% 55%)"} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Silent vs Active */}
-        <div className="glass-card rounded-xl p-6 lg:col-span-2">
-          <h3 className="font-semibold mb-4">Deputados mais ativos vs. silenciosos</h3>
+        {/* Active vs Silent */}
+        <div className="glass-card rounded-xl p-6">
+          <h3 className="font-semibold mb-4">Deputados ativos vs. silenciosos</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <div>
-              <h4 className="text-sm text-muted-foreground mb-3">🎤 Mais ativos</h4>
+              <h4 className="text-sm text-muted-foreground mb-3">Mais ativos</h4>
               <div className="space-y-3">
-                {[...mockPoliticians].sort((a, b) => b.total_speaking_seconds - a.total_speaking_seconds).slice(0, 5).map((p, i) => (
-                  <div key={p.id} className="flex items-center gap-3">
-                    <span className="text-sm font-mono text-muted-foreground w-5">{i + 1}.</span>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-medium text-sm">{p.name}</span>
-                        <span className="text-xs" style={{ color: PARTY_COLORS[p.party] }}>{p.party}</span>
+                {[...active]
+                  .sort((a, b) => b.total_speaking_seconds - a.total_speaking_seconds)
+                  .slice(0, 5)
+                  .map((p, i) => {
+                    const maxSecs = politicians.reduce((m, pp) => Math.max(m, pp.total_speaking_seconds), 1);
+                    return (
+                      <div key={p.id} className="flex items-center gap-3">
+                        <span className="text-sm font-mono text-muted-foreground w-4">{i + 1}.</span>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-medium text-sm truncate">{p.name}</span>
+                            <span className="text-xs shrink-0" style={{ color: PARTY_COLORS[p.party] }}>{p.party}</span>
+                          </div>
+                          <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-primary"
+                              style={{ width: `${(p.total_speaking_seconds / maxSecs) * 100}%` }}
+                            />
+                          </div>
+                        </div>
+                        <span className="font-mono text-xs shrink-0">{Math.round(p.total_speaking_seconds / 60)} min</span>
                       </div>
-                      <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                        <div className="h-full rounded-full bg-primary" style={{ width: `${(p.total_speaking_seconds / mockPoliticians.reduce((max, pp) => Math.max(max, pp.total_speaking_seconds), 1)) * 100}%` }} />
-                      </div>
-                    </div>
-                    <span className="font-mono text-xs">{Math.round(p.total_speaking_seconds / 60)} min</span>
-                  </div>
-                ))}
+                    );
+                  })}
               </div>
             </div>
             <div>
-              <h4 className="text-sm text-muted-foreground mb-3">🤫 Silenciosos ({silentPols.length})</h4>
-              {silentPols.length > 0 ? (
+              <h4 className="text-sm text-muted-foreground mb-3">Silenciosos ({silent.length})</h4>
+              {silent.length > 0 ? (
                 <div className="space-y-2">
-                  {silentPols.map(p => (
+                  {silent.slice(0, 8).map(p => (
                     <div key={p.id} className="flex items-center gap-2 text-sm">
-                      <span className="font-medium">{p.name}</span>
-                      <span className="text-xs" style={{ color: PARTY_COLORS[p.party] }}>{p.party}</span>
-                      <span className="text-xs text-muted-foreground ml-auto">0 discursos</span>
+                      <span className="font-medium truncate">{p.name}</span>
+                      <span className="text-xs ml-auto shrink-0" style={{ color: PARTY_COLORS[p.party] }}>{p.party}</span>
                     </div>
                   ))}
+                  {silent.length > 8 && (
+                    <p className="text-xs text-muted-foreground">+{silent.length - 8} mais</p>
+                  )}
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">Todos os deputados participaram.</p>
@@ -148,9 +243,8 @@ const Stats = () => {
             </div>
           </div>
         </div>
+
       </div>
     </div>
   );
-};
-
-export default Stats;
+}

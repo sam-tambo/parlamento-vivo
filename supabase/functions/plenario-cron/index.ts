@@ -1,142 +1,170 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+/**
+ * Supabase Edge Function: plenario-cron
+ * ======================================
+ * Scheduled trigger (via pg_cron or Supabase cron) that drives the
+ * serverless transcription loop for the ARTV Plenário live stream.
+ *
+ * Flow every 30 seconds:
+ *   1. Look up the active live session in `sessions` table
+ *   2. If none → check whether parliament is in session (weekday 10:00–19:00)
+ *      and create one with the known ARTV HLS URL
+ *   3. Fetch the latest HLS segments from the stored stream URL
+ *   4. POST to the `transcribe` edge function (which calls HF Whisper + stores results)
+ *   5. Update session stats (total words, filler count, duration)
+ *
+ * The HLS URL is discovered once (by the Python worker or manually) and
+ * stored in sessions.artv_stream_url. Everything after that is serverless.
+ *
+ * HOW TO TRIGGER:
+ *   Option A — Supabase cron (Dashboard → Edge Functions → Schedules):
+ *     Schedule: every 30 seconds  →  POST /functions/v1/plenario-cron
+ *
+ *   Option B — pg_cron (see migration 004_cron.sql):
+ *     SELECT cron.schedule('plenario-loop', '30 seconds', $$ ... $$);
+ *
+ *   Option C — External cron (GitHub Actions, Render.com cron job, etc.):
+ *     curl -X POST https://<project>.supabase.co/functions/v1/plenario-cron \
+ *          -H "Authorization: Bearer <anon-key>"
+ *
+ * Secrets required:
+ *   HF_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (all auto-available)
+ */
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
-Deno.serve(async (req) => {
+const ARTV_PLENARIO = "https://canal.parlamento.pt/plenario";
+
+// Parliament typically sits Mon–Fri, 10:00–19:30 Lisbon time
+// Outside these hours we skip processing to avoid empty audio errors
+function isParliamentHours(): boolean {
+  const now = new Date(
+    new Date().toLocaleString("en-US", { timeZone: "Europe/Lisbon" })
+  );
+  const day  = now.getDay();   // 0=Sun, 6=Sat
+  const hour = now.getHours();
+  return day >= 1 && day <= 5 && hour >= 9 && hour < 20;
+}
+
+Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { headers: { "Access-Control-Allow-Origin": "*" } });
   }
 
-  try {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, serviceKey);
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
 
-    const now = new Date();
-    const hour = now.getUTCHours(); // ARTV is in Portugal (WET/WEST = UTC+0/+1)
-    const today = now.toISOString().split("T")[0];
+  const SUPABASE_URL    = Deno.env.get("SUPABASE_URL")!;
+  const SERVICE_KEY     = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  // Edge functions are served under /functions/v1/ on the same project URL
+  const FUNCTIONS_URL   = `${SUPABASE_URL}/functions/v1`;
 
-    const results: string[] = [];
+  // ── 1. Check parliament hours ─────────────────────────────────────────────
+  if (!isParliamentHours()) {
+    return Response.json({ skipped: true, reason: "outside parliament hours" });
+  }
 
-    // ── Step 1: Check if ARTV plenario is likely live (weekdays 10-17 Lisbon time) ──
-    const dayOfWeek = now.getUTCDay(); // 0=Sun, 6=Sat
-    const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
-    // Approximate Lisbon time (UTC+0 in winter, UTC+1 in summer)
-    const lisbonHour = hour; // Close enough for WET; adjust +1 for WEST if needed
+  // ── 2. Find or create active session ─────────────────────────────────────
+  // Use Lisbon local date, not UTC, so the session date matches the parliament calendar
+  const today = new Date()
+    .toLocaleDateString("sv-SE", { timeZone: "Europe/Lisbon" }); // "2026-02-27" format
 
-    if (isWeekday && lisbonHour >= 10 && lisbonHour < 17) {
-      // Check if we already have a session for today
-      const { data: existingSession } = await supabase
-        .from("sessions")
-        .select("id, status")
-        .eq("date", today)
-        .maybeSingle();
+  let { data: sessions } = await supabase
+    .from("sessions")
+    .select("id, artv_stream_url, total_filler_count, total_speaking_minutes")
+    .eq("status", "live")
+    .eq("date", today)
+    .order("created_at", { ascending: false })
+    .limit(1);
 
-      if (!existingSession) {
-        // Create a new session record for today's potential plenary
-        const { data: newSession, error } = await supabase.from("sessions").insert({
-          date: today,
-          status: "live",
-          transcript_status: "pending",
-          artv_stream_url: "https://canal.parlamento.pt/plenario",
-          start_time: `${String(lisbonHour).padStart(2, "0")}:${String(now.getUTCMinutes()).padStart(2, "0")}`,
-        }).select("id").single();
+  let session = sessions?.[0] ?? null;
 
-        if (error) {
-          console.error("Failed to create session:", error);
-        } else {
-          results.push(`Created session ${newSession.id} for ${today}`);
-        }
-      } else if (existingSession.status === "live") {
-        results.push(`Session for ${today} already live (${existingSession.id})`);
-      }
-    } else {
-      // Outside monitoring hours — mark any live sessions as ended
-      const { data: liveSessions } = await supabase
-        .from("sessions")
-        .select("id")
-        .eq("date", today)
-        .eq("status", "live");
-
-      if (liveSessions?.length) {
-        for (const s of liveSessions) {
-          await supabase.from("sessions").update({
-            status: "ended",
-            end_time: `${String(lisbonHour).padStart(2, "0")}:${String(now.getUTCMinutes()).padStart(2, "0")}`,
-          }).eq("id", s.id);
-          results.push(`Marked session ${s.id} as ended`);
-        }
-      }
-    }
-
-    // ── Step 2: Process pending transcriptions ──
-    const { data: pendingSessions } = await supabase
+  if (!session) {
+    // No live session today — create one.
+    // The stream URL should be discovered by the Python worker or set manually.
+    // We store ARTV_PLENARIO as a placeholder; the real HLS URL comes from
+    // the worker after it runs `python scraper.py` once.
+    const { data: newSession, error } = await supabase
       .from("sessions")
-      .select("id, artv_video_url, artv_stream_url")
-      .eq("transcript_status", "pending")
-      .eq("status", "ended")
-      .limit(3);
+      .insert({
+        date:              today,
+        status:            "live",
+        artv_stream_url:   ARTV_PLENARIO,
+        start_time:        new Date().toLocaleTimeString("pt-PT", { timeZone: "Europe/Lisbon", hour12: false }),
+        transcript_status: "processing",
+      })
+      .select()
+      .single();
 
-    if (pendingSessions?.length) {
-      const hfToken = Deno.env.get("HF_TOKEN");
-      if (!hfToken) {
-        results.push("HF_TOKEN not set — skipping transcription");
-      } else {
-        for (const session of pendingSessions) {
-          const audioUrl = session.artv_video_url || session.artv_stream_url;
-          if (!audioUrl) {
-            results.push(`Session ${session.id}: no audio URL, skipping`);
-            continue;
-          }
-
-          // Mark as processing
-          await supabase.from("sessions").update({ transcript_status: "processing" }).eq("id", session.id);
-
-          // Call the transcribe function
-          try {
-            const transcribeUrl = `${supabaseUrl}/functions/v1/transcribe`;
-            const res = await fetch(transcribeUrl, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${serviceKey}`,
-              },
-              body: JSON.stringify({
-                mode: "transcribe",
-                audio_url: audioUrl,
-                session_id: session.id,
-              }),
-            });
-
-            const resBody = await res.text();
-            if (res.ok) {
-              results.push(`Session ${session.id}: transcription started`);
-            } else {
-              results.push(`Session ${session.id}: transcription failed — ${resBody}`);
-              await supabase.from("sessions").update({ transcript_status: "failed" }).eq("id", session.id);
-            }
-          } catch (err) {
-            results.push(`Session ${session.id}: transcription error — ${err.message}`);
-            await supabase.from("sessions").update({ transcript_status: "failed" }).eq("id", session.id);
-          }
-        }
-      }
-    } else {
-      results.push("No pending transcriptions");
+    if (error || !newSession) {
+      return Response.json({ error: "Could not create session", detail: error?.message }, { status: 500 });
     }
+    session = newSession;
+    console.log(`[cron] Created session ${session.id} for ${today}`);
+  }
 
-    return new Response(JSON.stringify({ ok: true, time: now.toISOString(), results }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  } catch (err) {
-    console.error("Plenario cron error:", err);
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+  const streamUrl = session.artv_stream_url;
+
+  // If the stored URL is just the landing page (not an HLS URL), we can't
+  // process audio yet. Return a clear message so operators know to run the
+  // Python scraper once to discover the real HLS URL.
+  if (!streamUrl || !streamUrl.includes(".m3u8")) {
+    return Response.json({
+      session_id: session.id,
+      waiting:    true,
+      message:    "HLS URL not yet discovered. Run: python worker/scraper.py once to find it, then update sessions.artv_stream_url.",
     });
   }
+
+  // ── 3. Call the transcribe edge function ──────────────────────────────────
+  console.log(`[cron] Sending HLS chunk to transcribe function …`);
+  const transcribeResp = await fetch(`${FUNCTIONS_URL}/transcribe`, {
+    method:  "POST",
+    headers: {
+      "Content-Type":     "application/json",
+      "Authorization":    `Bearer ${SERVICE_KEY}`,
+      "x-session-id":     session.id,
+    },
+    body: JSON.stringify({
+      m3u8_url:      streamUrl,
+      segment_count: 5,          // ~30 seconds (5 × 6s segments)
+    }),
+  });
+
+  let result: Record<string, unknown> = {};
+  if (transcribeResp.ok) {
+    result = await transcribeResp.json();
+  } else {
+    const body = await transcribeResp.text();
+    // 503 = model loading; will be ready next invocation
+    console.warn(`[cron] transcribe returned ${transcribeResp.status}: ${body.slice(0, 200)}`);
+    return Response.json({ session_id: session.id, status: transcribeResp.status, body: body.slice(0, 200) });
+  }
+
+  // ── 4. Update session aggregates ──────────────────────────────────────────
+  const newFillers   = (session.total_filler_count    ?? 0) + ((result.filler_count as number) ?? 0);
+  const newMinutes   = (session.total_speaking_minutes ?? 0) + (30 / 60); // ~30s chunk
+
+  await supabase
+    .from("sessions")
+    .update({
+      total_filler_count:    newFillers,
+      total_speaking_minutes: parseFloat(newMinutes.toFixed(2)),
+    })
+    .eq("id", session.id);
+
+  console.log(
+    `[cron] Done. Session ${session.id} | ` +
+    `words=${result.total_words} fillers=${result.filler_count} (${((((result.filler_count as number) ?? 0) / Math.max((result.total_words as number) ?? 1, 1)) * 100).toFixed(1)}%)`
+  );
+
+  return Response.json({
+    session_id:    session.id,
+    text_preview:  (result.text as string)?.slice(0, 100),
+    filler_count:  result.filler_count,
+    filler_words:  result.filler_words,
+    total_words:   result.total_words,
+    elapsed_s:     result.elapsed_s,
+  });
 });

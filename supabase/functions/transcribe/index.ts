@@ -1,198 +1,263 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+/**
+ * Supabase Edge Function: transcribe
+ * ==================================
+ * Full serverless pipeline for one ~30-second audio chunk:
+ *
+ *   1. Receive audio:
+ *        POST /functions/v1/transcribe
+ *        Body: multipart/form-data  { audio: <file> }
+ *        OR    application/json     { audio_url: "https://..." }
+ *        OR    application/octet-stream  (raw audio bytes)
+ *
+ *   2. If audio_url provided: fetch the bytes server-side
+ *      (keeps HLS segment URLs off the client)
+ *
+ *   3. Call HF Inference API → openai/whisper-large-v3
+ *
+ *   4. Run Portuguese filler-word detection (same catalog as src/lib/filler-words.ts)
+ *
+ *   5. Insert row into transcript_events (triggers Supabase Realtime to the UI)
+ *
+ *   6. Return { text, filler_count, filler_words, total_words }
+ *
+ * Called by:
+ *   - plenario-cron edge function (every 30 s, serverless loop)
+ *   - Python ai_worker.py (can POST pre-captured WAV chunks)
+ *   - Future: browser MediaRecorder for live microphone capture
+ *
+ * Secrets required (set in Supabase dashboard → Settings → Edge Functions):
+ *   HF_TOKEN             — HuggingFace token with Whisper access
+ *   SUPABASE_URL         — auto-injected by Supabase
+ *   SUPABASE_SERVICE_ROLE_KEY — auto-injected by Supabase
+ */
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
-const PORTUGUESE_FILLERS = [
-  "portanto", "digamos", "ou seja", "pronto", "basicamente",
-  "efetivamente", "de facto", "na verdade", "quer dizer", "tipo",
-  "ok", "bem", "olhe", "enfim",
-];
+// ─── Filler word catalog (mirrors src/lib/filler-words.ts) ───────────────────
 
-function countFillers(text: string): { total: number; detail: Record<string, number>; totalWords: number } {
-  const lower = text.toLowerCase();
-  const totalWords = lower.split(/\s+/).filter(Boolean).length;
-  const detail: Record<string, number> = {};
-  let total = 0;
+const FILLER_CATALOG: string[] = [
+  // stallers (longest first for greedy match)
+  "como direi", "de certa forma", "de alguma maneira", "por assim dizer",
+  "de certa maneira", "de algum modo",
+  // connectors
+  "portanto", "ou seja", "de facto", "na verdade",
+  // hesitation / filler
+  "quer dizer", "digamos", "basicamente", "efetivamente",
+  "pronto", "enfim", "olhe", "tipo", "ok", "bem", "ora", "pois",
+  "assim", "então", "depois", "exatamente", "claro",
+  "obviamente", "naturalmente", "certamente", "ah", "eh", "hm",
+].sort((a, b) => b.length - a.length); // longest first
 
-  for (const filler of PORTUGUESE_FILLERS) {
-    const regex = new RegExp(`\\b${filler}\\b`, "gi");
-    const matches = lower.match(regex);
-    if (matches) {
-      detail[filler] = matches.length;
-      total += matches.length;
+function detectFillers(text: string): { count: number; words: Record<string, number> } {
+  let remaining = text.toLowerCase();
+  const words: Record<string, number> = {};
+
+  for (const filler of FILLER_CATALOG) {
+    const escaped = filler.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${escaped}\\b`, "gi");
+    const hits = remaining.match(re);
+    if (hits?.length) {
+      words[filler] = hits.length;
+      remaining = remaining.replace(re, " ".repeat(filler.length));
     }
   }
 
-  return { total, detail, totalWords };
+  const count = Object.values(words).reduce((s, n) => s + n, 0);
+  return { count, words };
 }
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+// ─── HF Whisper API ──────────────────────────────────────────────────────────
+
+const WHISPER_MODEL = "openai/whisper-large-v3";
+const HF_API = `https://api-inference.huggingface.co/models/${WHISPER_MODEL}`;
+
+// HF Inference API accepts audio in the request body.
+// We send raw bytes + let it auto-detect the format.
+async function transcribeWithHF(
+  audioBytes: Uint8Array,
+  hfToken: string,
+): Promise<string> {
+  const resp = await fetch(HF_API, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${hfToken}`,
+      "Content-Type": "application/octet-stream",
+      // Ask Whisper to return the full text (not streaming)
+      "X-Wait-For-Model": "true",
+    },
+    body: audioBytes,
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    // Model may be loading — retry hint included in response
+    throw new Error(`HF API ${resp.status}: ${err.slice(0, 300)}`);
   }
 
+  const json = await resp.json();
+  // Response shape: { text: "..." }  or  [{ text: "..." }]
+  if (typeof json?.text === "string") return json.text.trim();
+  if (Array.isArray(json) && json[0]?.text) return json[0].text.trim();
+  throw new Error(`Unexpected HF response: ${JSON.stringify(json).slice(0, 200)}`);
+}
+
+// ─── HLS audio fetcher ───────────────────────────────────────────────────────
+
+/**
+ * Given a .m3u8 playlist URL, fetch the last `segmentCount` .ts segments
+ * and return them concatenated as a Uint8Array.
+ *
+ * MPEG-TS segments are sent directly to HF Whisper, which accepts them.
+ */
+async function fetchHLSChunk(
+  m3u8Url: string,
+  segmentCount: number = 5,
+): Promise<Uint8Array> {
+  const playlistResp = await fetch(m3u8Url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)" },
+  });
+  if (!playlistResp.ok) throw new Error(`M3U8 fetch failed: ${playlistResp.status}`);
+
+  const playlist = await playlistResp.text();
+  const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf("/") + 1);
+
+  const segmentUrls = playlist
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .slice(-segmentCount)
+    .map((url) => (url.startsWith("http") ? url : baseUrl + url));
+
+  if (segmentUrls.length === 0) throw new Error("No segments found in playlist");
+
+  const buffers = await Promise.all(
+    segmentUrls.map((url) =>
+      fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; ParlamentoVivo/1.0)" },
+      }).then((r) => {
+        if (!r.ok) throw new Error(`Segment fetch failed: ${r.status} ${url}`);
+        return r.arrayBuffer();
+      })
+    )
+  );
+
+  const total = buffers.reduce((s, b) => s + b.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const buf of buffers) {
+    out.set(new Uint8Array(buf), offset);
+    offset += buf.byteLength;
+  }
+  return out;
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-session-id, x-politician-id",
+};
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: CORS_HEADERS });
+  }
+
+  const HF_TOKEN = Deno.env.get("HF_TOKEN") ?? "";
+  if (!HF_TOKEN) {
+    return Response.json({ error: "HF_TOKEN not configured" }, { status: 500, headers: CORS_HEADERS });
+  }
+
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+
+  // ── Parse session / politician from headers ──────────────────────────────
+  const sessionId    = req.headers.get("x-session-id")    ?? null;
+  const politicianId = req.headers.get("x-politician-id") ?? null;
+
   try {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, serviceKey);
+    // ── Acquire audio bytes ─────────────────────────────────────────────────
+    let audioBytes: Uint8Array;
+    const ct = req.headers.get("content-type") ?? "";
 
-    const body = await req.json();
+    if (ct.includes("application/json")) {
+      // Caller passed { audio_url, m3u8_url, segment_count? }
+      const body = await req.json();
 
-    // Mode 1: Receive pre-processed results from external worker
-    if (body.mode === "results") {
-      const { session_id, speeches } = body;
-      if (!session_id || !speeches?.length) {
-        return new Response(JSON.stringify({ error: "session_id and speeches[] required" }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+      if (body.m3u8_url) {
+        console.log(`[transcribe] Fetching HLS from ${body.m3u8_url}`);
+        audioBytes = await fetchHLSChunk(body.m3u8_url, body.segment_count ?? 5);
+      } else if (body.audio_url) {
+        console.log(`[transcribe] Fetching audio from ${body.audio_url}`);
+        const r = await fetch(body.audio_url);
+        if (!r.ok) throw new Error(`audio_url fetch failed: ${r.status}`);
+        audioBytes = new Uint8Array(await r.arrayBuffer());
+      } else {
+        return Response.json({ error: "Provide m3u8_url or audio_url" }, { status: 400, headers: CORS_HEADERS });
       }
-
-      let totalFillers = 0;
-      let totalSpeakingSeconds = 0;
-
-      for (const s of speeches) {
-        const fillerAnalysis = s.filler_words_detail
-          ? { total: s.filler_word_count, detail: s.filler_words_detail, totalWords: s.total_word_count }
-          : countFillers(s.transcript_excerpt || "");
-
-        const speechRow = {
-          session_id,
-          politician_id: s.politician_id,
-          speaking_duration_seconds: s.speaking_duration_seconds || 0,
-          filler_word_count: fillerAnalysis.total,
-          total_word_count: fillerAnalysis.totalWords,
-          filler_ratio: fillerAnalysis.totalWords > 0 ? fillerAnalysis.total / fillerAnalysis.totalWords : 0,
-          filler_words_detail: fillerAnalysis.detail,
-          transcript_excerpt: s.transcript_excerpt || null,
-        };
-
-        const { error } = await supabase.from("speeches").insert(speechRow);
-        if (error) console.error("Insert speech error:", error);
-
-        totalFillers += fillerAnalysis.total;
-        totalSpeakingSeconds += speechRow.speaking_duration_seconds;
-
-        // Update politician aggregates
-        await supabase.rpc("update_politician_aggregates_manual", {
-          p_id: s.politician_id,
-          add_seconds: speechRow.speaking_duration_seconds,
-          add_fillers: fillerAnalysis.total,
-          add_speeches: 1,
-          new_ratio: speechRow.filler_ratio,
-        }).then(({ error }) => {
-          // If RPC doesn't exist, fall back to manual update
-          if (error) {
-            return supabase
-              .from("politicians")
-              .select("total_speaking_seconds, total_filler_count, total_speeches")
-              .eq("id", s.politician_id)
-              .single()
-              .then(({ data: pol }) => {
-                if (!pol) return;
-                const newTotalSpeeches = (pol.total_speeches || 0) + 1;
-                const newTotalSeconds = (pol.total_speaking_seconds || 0) + speechRow.speaking_duration_seconds;
-                const newTotalFillers = (pol.total_filler_count || 0) + fillerAnalysis.total;
-                return supabase.from("politicians").update({
-                  total_speaking_seconds: newTotalSeconds,
-                  total_filler_count: newTotalFillers,
-                  total_speeches: newTotalSpeeches,
-                  average_filler_ratio: newTotalFillers / Math.max(newTotalSpeeches, 1),
-                }).eq("id", s.politician_id);
-              });
-          }
-        });
-      }
-
-      // Update session
-      await supabase.from("sessions").update({
-        transcript_status: "completed",
-        total_filler_count: totalFillers,
-        total_speaking_minutes: totalSpeakingSeconds / 60,
-      }).eq("id", session_id);
-
-      return new Response(JSON.stringify({ ok: true, speeches_processed: speeches.length }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    } else if (ct.includes("multipart/form-data")) {
+      const form  = await req.formData();
+      const file  = form.get("audio") as File | null;
+      if (!file) return Response.json({ error: "No audio field in form" }, { status: 400, headers: CORS_HEADERS });
+      audioBytes = new Uint8Array(await file.arrayBuffer());
+    } else {
+      // Raw bytes (application/octet-stream or audio/*)
+      audioBytes = new Uint8Array(await req.arrayBuffer());
     }
 
-    // Mode 2: Transcribe audio via HuggingFace Whisper API
-    if (body.mode === "transcribe") {
-      const { audio_url, session_id } = body;
-      if (!audio_url) {
-        return new Response(JSON.stringify({ error: "audio_url required" }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
+    console.log(`[transcribe] Audio size: ${audioBytes.byteLength} bytes`);
 
-      const hfToken = Deno.env.get("HF_TOKEN");
-      if (!hfToken) {
-        return new Response(JSON.stringify({ error: "HF_TOKEN not configured" }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      // Update session status
-      if (session_id) {
-        await supabase.from("sessions").update({ transcript_status: "processing" }).eq("id", session_id);
-      }
-
-      // Fetch audio
-      const audioRes = await fetch(audio_url);
-      const audioBlob = await audioRes.blob();
-
-      // Call HuggingFace Whisper
-      const hfRes = await fetch(
-        "https://api-inference.huggingface.co/models/openai/whisper-medium",
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${hfToken}` },
-          body: audioBlob,
-        }
-      );
-
-      if (!hfRes.ok) {
-        const errText = await hfRes.text();
-        console.error("HF API error:", errText);
-        if (session_id) {
-          await supabase.from("sessions").update({ transcript_status: "failed" }).eq("id", session_id);
-        }
-        return new Response(JSON.stringify({ error: "HF transcription failed", details: errText }), {
-          status: 502,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      const result = await hfRes.json();
-      const transcript = result.text || "";
-
-      // Analyze fillers
-      const analysis = countFillers(transcript);
-
-      return new Response(JSON.stringify({
-        transcript,
-        filler_analysis: analysis,
-        session_id,
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    // ── Transcribe ──────────────────────────────────────────────────────────
+    const startMs = Date.now();
+    let text: string;
+    try {
+      text = await transcribeWithHF(audioBytes, HF_TOKEN);
+    } catch (e) {
+      // Model loading — tell the caller to retry
+      return Response.json({ error: String(e), retry_after: 20 }, { status: 503, headers: CORS_HEADERS });
     }
 
-    return new Response(JSON.stringify({ error: "Invalid mode. Use 'results' or 'transcribe'" }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+    console.log(`[transcribe] HF took ${elapsed}s → "${text.slice(0, 80)}…"`);
+
+    if (!text) {
+      return Response.json({ text: "", filler_count: 0, filler_words: {}, total_words: 0 }, { headers: CORS_HEADERS });
+    }
+
+    // ── Filler detection ────────────────────────────────────────────────────
+    const { count: fillerCount, words: fillerWords } = detectFillers(text);
+    const totalWords = text.split(/\s+/).filter(Boolean).length;
+
+    console.log(
+      `[transcribe] ${totalWords} words, ${fillerCount} fillers ` +
+      `(${((fillerCount / Math.max(totalWords, 1)) * 100).toFixed(1)}%)`
+    );
+
+    // ── Persist to transcript_events ────────────────────────────────────────
+    if (sessionId) {
+      const { error } = await supabase.from("transcript_events").insert({
+        session_id:         sessionId,
+        politician_id:      politicianId,
+        text_segment:       text,
+        filler_count:       fillerCount,
+        total_words:        totalWords,
+        filler_words_found: fillerWords,
+        duration_seconds:   null,
+      });
+      if (error) console.error("[transcribe] Supabase insert error:", error.message);
+    }
+
+    return Response.json({
+      text,
+      filler_count:  fillerCount,
+      filler_words:  fillerWords,
+      total_words:   totalWords,
+      elapsed_s:     parseFloat(elapsed),
+    }, { headers: CORS_HEADERS });
   } catch (err) {
-    console.error("Transcribe error:", err);
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    console.error("[transcribe] Error:", err);
+    return Response.json({ error: String(err) }, { status: 500, headers: CORS_HEADERS });
   }
 });

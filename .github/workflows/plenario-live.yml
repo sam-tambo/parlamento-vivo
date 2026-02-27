@@ -1,0 +1,66 @@
+name: Plenário Live Monitor
+
+# ┌─────────────────────────────────────────────────────────────────────────────
+# │ Runs every 5 minutes during Portuguese parliament hours (Mon–Fri 9am–8pm).
+# │ Each run:
+# │   1. yt-dlp discovers the live ARTV HLS stream URL (~10s)
+# │   2. Upserts today's live session in Lovable Cloud
+# │   3. POSTs to the `transcribe` Lovable edge function
+# │      → fetches ~30s of audio → HF Whisper → filler detection → DB → Realtime
+# │
+# │ REQUIRED GitHub repository secret (Settings → Secrets → Actions → New secret):
+# │   LOVABLE_SERVICE_KEY  Lovable Cloud → project settings → API → service_role key
+# │
+# │ That is the ONLY secret needed. The Lovable Cloud project URL is already
+# │ embedded in worker/live_trigger.py — no SUPABASE_URL secret required.
+# └─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Every 5 min, Mon–Fri, 08:00–20:00 UTC
+    # Portugal is UTC+0 (WET, Oct–Mar) or UTC+1 (WEST, Mar–Oct).
+    # 08:00 UTC covers 09:00 Lisbon in winter and 09:00 in summer (WEST, UTC+1 starts at 01:00).
+    - cron: '*/5 8-20 * * 1-5'
+  workflow_dispatch:
+    # Allow manual trigger from GitHub UI (useful for testing + first run)
+    inputs:
+      debug:
+        description: 'Print extra debug info'
+        required: false
+        default: 'false'
+
+jobs:
+  transcribe-chunk:
+    name: Transcribe 30s chunk
+    runs-on: ubuntu-latest
+    timeout-minutes: 5       # each chunk takes ~60s; 5 min is very generous
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install yt-dlp
+        # yt-dlp is the only non-stdlib dependency; installs in ~5 seconds
+        run: pip install --quiet yt-dlp
+
+      - name: Run live trigger
+        env:
+          # Lovable Cloud service-role key (add under repo Settings → Secrets → Actions)
+          LOVABLE_SERVICE_KEY: ${{ secrets.LOVABLE_SERVICE_KEY }}
+        run: python worker/live_trigger.py
+
+      # ── Optional: upload logs for debugging ───────────────────────────────
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-log-${{ github.run_id }}
+          path: /tmp/plenario-*.log
+          if-no-files-found: ignore
+          retention-days: 3
