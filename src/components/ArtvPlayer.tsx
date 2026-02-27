@@ -64,8 +64,9 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
   const updateStatus = useCallback((s: Status) => {
     setStatus(s);
     onStatus?.(s);
-    if (s === "playing" && videoRef.current) onReady?.(videoRef.current);
-  }, [onStatus, onReady]);
+    // NOTE: onReady is NOT called here — it fires on the video "playing" event
+    // below so that audio tracks are guaranteed to be active when startCapture runs.
+  }, [onStatus]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -105,9 +106,17 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         updateStatus("playing");
-        // Muted autoplay is allowed; unmute is user-initiated via controls
         video.play().catch(() => {});
       });
+
+      // Fire onReady only when the video is ACTUALLY playing (not just parsed).
+      // At this point audio segments are buffered and captureStream() returns
+      // real audio tracks — calling it at MANIFEST_PARSED is too early.
+      const onPlaying = () => {
+        video.removeEventListener("playing", onPlaying);
+        if (onReady) onReady(video);
+      };
+      video.addEventListener("playing", onPlaying);
 
       // Fallback chain: proxied playout nodes → then direct CDN (no proxy,
       // last resort in case hls-proxy isn't deployed yet or CDN allows CORS).
@@ -164,6 +173,7 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
       });
 
       return () => {
+        video.removeEventListener("playing", onPlaying);
         hls.destroy();
         hlsRef.current = null;
       };
@@ -174,14 +184,17 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;
 
-      const onMeta  = () => { updateStatus("playing"); video.play().catch(() => {}); };
-      const onError = () => updateStatus("error");
+      const onMeta    = () => { updateStatus("playing"); video.play().catch(() => {}); };
+      const onPlaying = () => { video.removeEventListener("playing", onPlaying); if (onReady) onReady(video); };
+      const onError   = () => updateStatus("error");
 
       video.addEventListener("loadedmetadata", onMeta);
+      video.addEventListener("playing",        onPlaying);
       video.addEventListener("error",          onError);
 
       return () => {
         video.removeEventListener("loadedmetadata", onMeta);
+        video.removeEventListener("playing",        onPlaying);
         video.removeEventListener("error",          onError);
       };
     }
@@ -203,7 +216,6 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
         ref={videoRef}
         className="absolute inset-0 w-full h-full"
         controls
-        muted
         playsInline
         style={{ display: status === "error" ? "none" : "block" }}
       />
