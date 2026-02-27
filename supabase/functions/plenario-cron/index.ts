@@ -57,7 +57,8 @@ Deno.serve(async (req: Request) => {
 
   const SUPABASE_URL    = Deno.env.get("SUPABASE_URL")!;
   const SERVICE_KEY     = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const FUNCTIONS_URL   = SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co");
+  // Edge functions are served under /functions/v1/ on the same project URL
+  const FUNCTIONS_URL   = `${SUPABASE_URL}/functions/v1`;
 
   // ── 1. Check parliament hours ─────────────────────────────────────────────
   if (!isParliamentHours()) {
@@ -65,7 +66,9 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 2. Find or create active session ─────────────────────────────────────
-  const today = new Date().toISOString().slice(0, 10);
+  // Use Lisbon local date, not UTC, so the session date matches the parliament calendar
+  const today = new Date()
+    .toLocaleDateString("sv-SE", { timeZone: "Europe/Lisbon" }); // "2026-02-27" format
 
   let { data: sessions } = await supabase
     .from("sessions")

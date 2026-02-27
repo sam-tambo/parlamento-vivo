@@ -153,19 +153,19 @@ async function fetchHLSChunk(
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-session-id, x-politician-id",
+};
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, content-type, x-session-id, x-politician-id",
-      },
-    });
+    return new Response(null, { headers: CORS_HEADERS });
   }
 
   const HF_TOKEN = Deno.env.get("HF_TOKEN") ?? "";
   if (!HF_TOKEN) {
-    return Response.json({ error: "HF_TOKEN not configured" }, { status: 500 });
+    return Response.json({ error: "HF_TOKEN not configured" }, { status: 500, headers: CORS_HEADERS });
   }
 
   const supabase = createClient(
@@ -195,12 +195,12 @@ Deno.serve(async (req: Request) => {
         if (!r.ok) throw new Error(`audio_url fetch failed: ${r.status}`);
         audioBytes = new Uint8Array(await r.arrayBuffer());
       } else {
-        return Response.json({ error: "Provide m3u8_url or audio_url" }, { status: 400 });
+        return Response.json({ error: "Provide m3u8_url or audio_url" }, { status: 400, headers: CORS_HEADERS });
       }
     } else if (ct.includes("multipart/form-data")) {
       const form  = await req.formData();
       const file  = form.get("audio") as File | null;
-      if (!file) return Response.json({ error: "No audio field in form" }, { status: 400 });
+      if (!file) return Response.json({ error: "No audio field in form" }, { status: 400, headers: CORS_HEADERS });
       audioBytes = new Uint8Array(await file.arrayBuffer());
     } else {
       // Raw bytes (application/octet-stream or audio/*)
@@ -216,14 +216,14 @@ Deno.serve(async (req: Request) => {
       text = await transcribeWithHF(audioBytes, HF_TOKEN);
     } catch (e) {
       // Model loading — tell the caller to retry
-      return Response.json({ error: String(e), retry_after: 20 }, { status: 503 });
+      return Response.json({ error: String(e), retry_after: 20 }, { status: 503, headers: CORS_HEADERS });
     }
 
     const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
     console.log(`[transcribe] HF took ${elapsed}s → "${text.slice(0, 80)}…"`);
 
     if (!text) {
-      return Response.json({ text: "", filler_count: 0, filler_words: {}, total_words: 0 });
+      return Response.json({ text: "", filler_count: 0, filler_words: {}, total_words: 0 }, { headers: CORS_HEADERS });
     }
 
     // ── Filler detection ────────────────────────────────────────────────────
@@ -255,9 +255,9 @@ Deno.serve(async (req: Request) => {
       filler_words:  fillerWords,
       total_words:   totalWords,
       elapsed_s:     parseFloat(elapsed),
-    });
+    }, { headers: CORS_HEADERS });
   } catch (err) {
     console.error("[transcribe] Error:", err);
-    return Response.json({ error: String(err) }, { status: 500 });
+    return Response.json({ error: String(err) }, { status: 500, headers: CORS_HEADERS });
   }
 });
