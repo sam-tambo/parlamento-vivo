@@ -1,1 +1,7 @@
 project_id = "ugyvgtzsvhmcohnooxqp"
+
+[functions.transcribe]
+verify_jwt = false
+
+[functions.plenario-cron]
+verify_jwt = false
