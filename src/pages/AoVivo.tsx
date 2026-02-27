@@ -4,7 +4,7 @@ import { Radio, Mic, MicOff, ExternalLink, Zap, Clock, AlertCircle, Play } from 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { PARTY_COLORS, mockPoliticians } from "@/lib/mock-data";
 import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS, FILLER_CATALOG } from "@/lib/filler-words";
 import { useActiveSession, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
@@ -233,6 +233,7 @@ export default function AoVivo() {
               <p className="text-xs text-muted-foreground uppercase tracking-wider mb-2">A falar agora</p>
               <div className="flex items-center gap-3">
                 <Avatar className="h-12 w-12 border-2" style={{ borderColor: PARTY_COLORS[currentSpeaker.party] }}>
+                  {currentSpeaker.photo_url && <AvatarImage src={currentSpeaker.photo_url} alt={currentSpeaker.name} />}
                   <AvatarFallback className="bg-secondary font-bold">
                     {currentSpeaker.name.split(" ").map(n => n[0]).join("").slice(0, 2)}
                   </AvatarFallback>
@@ -359,6 +360,7 @@ function TranscriptBlock({ event, isNewest }: { event: LiveEvent; isNewest: bool
         {politician ? (
           <>
             <Avatar className="h-6 w-6 border" style={{ borderColor: PARTY_COLORS[politician.party] }}>
+              {politician.photo_url && <AvatarImage src={politician.photo_url} alt={politician.name} />}
               <AvatarFallback className="text-[10px] bg-secondary">
                 {politician.name.split(" ").map(n => n[0]).join("").slice(0, 2)}
               </AvatarFallback>

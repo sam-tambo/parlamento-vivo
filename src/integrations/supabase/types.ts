@@ -14,60 +14,6 @@ export type Database = {
   }
   public: {
     Tables: {
-      transcript_events: {
-        Row: {
-          id: string
-          session_id: string | null
-          politician_id: string | null
-          text_segment: string
-          filler_count: number
-          total_words: number
-          filler_words_found: Json
-          start_seconds: number | null
-          duration_seconds: number | null
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          session_id?: string | null
-          politician_id?: string | null
-          text_segment: string
-          filler_count?: number
-          total_words?: number
-          filler_words_found?: Json
-          start_seconds?: number | null
-          duration_seconds?: number | null
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          session_id?: string | null
-          politician_id?: string | null
-          text_segment?: string
-          filler_count?: number
-          total_words?: number
-          filler_words_found?: Json
-          start_seconds?: number | null
-          duration_seconds?: number | null
-          created_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "transcript_events_session_id_fkey"
-            columns: ["session_id"]
-            isOneToOne: false
-            referencedRelation: "sessions"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "transcript_events_politician_id_fkey"
-            columns: ["politician_id"]
-            isOneToOne: false
-            referencedRelation: "politicians"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       filler_words: {
         Row: {
           category: string
