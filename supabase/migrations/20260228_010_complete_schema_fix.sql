@@ -212,3 +212,33 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.refresh_all_politician_stats() TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.refresh_politician_stats(uuid) TO anon, authenticated;
+
+-- ── 6. speeches.politician_id — make nullable ─────────────────────────────────
+-- The original migration 002 created speeches.politician_id as NOT NULL.
+-- This prevents storing speeches for unidentified speakers (e.g. from the
+-- historic plenário scraper when a speaker name doesn't match any politician).
+-- Making it nullable allows us to store all speeches and match them later.
+ALTER TABLE public.speeches ALTER COLUMN politician_id DROP NOT NULL;
+
+-- Add INSERT + UPDATE RLS policies for service role on speeches
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'speeches'
+      AND policyname = 'Service role can insert speeches'
+  ) THEN
+    CREATE POLICY "Service role can insert speeches"
+      ON public.speeches FOR INSERT WITH CHECK (true);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'speeches'
+      AND policyname = 'Service role can update speeches'
+  ) THEN
+    CREATE POLICY "Service role can update speeches"
+      ON public.speeches FOR UPDATE USING (true) WITH CHECK (true);
+  END IF;
+END $$;

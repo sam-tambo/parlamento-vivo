@@ -172,15 +172,23 @@ export default function Plenario() {
     setImportDone(false);
 
     try {
-      // Create a job row for progress tracking
-      const { data: job, error: jobError } = await supabase
-        .from("plenario_import_jobs")
-        .insert({ legislatura: "XVII", status: "pending" })
-        .select()
-        .single();
-
-      if (jobError || !job) throw new Error(jobError?.message ?? "Failed to create job");
-      setActiveJobId(job.id);
+      // Try to create a job row for progress tracking.
+      // The plenario_import_jobs table only exists after migration 011 runs.
+      // If the table doesn't exist yet, we continue without job tracking.
+      let jobId: string | null = null;
+      try {
+        const { data: job } = await supabase
+          .from("plenario_import_jobs")
+          .insert({ legislatura: "XVII", status: "pending" })
+          .select("id")
+          .single();
+        if (job?.id) {
+          jobId = job.id;
+          setActiveJobId(jobId);
+        }
+      } catch {
+        // Table not yet created — import still works, just no live progress card
+      }
 
       // Call the edge function
       const resp = await supabase.functions.invoke("scrape-plenario", {
@@ -188,7 +196,7 @@ export default function Plenario() {
           legislatura: "XVII",
           batch_size: 5,
           offset: importOffset,
-          job_id: job.id,
+          ...(jobId ? { job_id: jobId } : {}),
         },
       });
 
@@ -203,10 +211,13 @@ export default function Plenario() {
         errors?: string[];
       };
 
+      if (result.done || result.next_offset === null) {
+        setImportDone(true);
+      }
       if (result.next_offset !== null) {
         setImportOffset(result.next_offset);
       }
-
+      setIsImporting(false);
       queryClient.invalidateQueries({ queryKey: ["plenario_sessions"] });
     } catch (err) {
       setImportError(String(err));
