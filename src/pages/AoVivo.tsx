@@ -106,28 +106,28 @@ export default function AoVivo() {
           signal:  AbortSignal.timeout(90_000),
         });
 
-        // HF model loading — retry with delay
-        if (resp.status === 503) {
-          let retryAfter = 20;
-          try { retryAfter = (await resp.json()).retry_after ?? 20; } catch { /* */ }
-          if (attempt < MAX_RETRIES) {
-            setCronMsg(`Modelo a carregar — nova tentativa em ${retryAfter} s…`);
-            await new Promise<void>(r => setTimeout(r, retryAfter * 1000));
-            continue;
-          }
-          setCronState("error");
-          setCronMsg("Modelo HF sobrecarregado — tente novamente em alguns minutos");
-          return;
-        }
-
         if (!resp.ok) {
-          const err = await resp.json().catch(() => null) as Record<string, unknown> | null;
-          const msg = String(err?.error ?? `HTTP ${resp.status}`);
+          const body = await resp.json().catch(() => null) as Record<string, unknown> | null;
+          const msg  = String(body?.error ?? `HTTP ${resp.status}`);
+
+          // 503 = HF model still loading → retry with delay
+          if (resp.status === 503) {
+            const retryAfter = Number(body?.retry_after ?? 20);
+            if (attempt < MAX_RETRIES) {
+              setCronMsg(`Modelo a carregar — nova tentativa em ${retryAfter} s…`);
+              await new Promise<void>(r => setTimeout(r, retryAfter * 1000));
+              continue;
+            }
+          }
+
+          // 502 = HF endpoint error (410 gone, wrong URL, etc.) — non-retryable
           setCronState("error");
-          if (msg.includes("HF_TOKEN")) {
-            setCronMsg("⚠️ HF_TOKEN não configurado — Supabase → Settings → Edge Functions");
+          if (msg.includes("HF_TOKEN") || msg.includes("token") || msg.includes("auth")) {
+            setCronMsg("⚠️ HF_TOKEN inválido ou sem permissões — verifique em Lovable → Secrets");
+          } else if (msg.includes("endpoint gone") || msg.includes("410") || resp.status === 502) {
+            setCronMsg("Endpoint HF indisponível — o modelo foi migrado; a tentar alternativas automaticamente…");
           } else {
-            setCronMsg(`Erro: ${msg.slice(0, 120)}`);
+            setCronMsg(`Erro Whisper: ${msg.slice(0, 120)}`);
           }
           return;
         }

@@ -68,37 +68,91 @@ function detectFillers(text: string): { count: number; words: Record<string, num
 
 // ─── HF Whisper API ──────────────────────────────────────────────────────────
 
-const WHISPER_MODEL = "openai/whisper-large-v3";
-const HF_API = `https://api-inference.huggingface.co/models/${WHISPER_MODEL}`;
+// Model preference: large-v3 → large-v3-turbo (smaller/faster fallback).
+// The router.huggingface.co endpoint is the current (2025) Inference Providers
+// path; api-inference.huggingface.co returns 410 for many models since HF's
+// free-tier migration to the new routing layer.
+const WHISPER_MODELS = [
+  "openai/whisper-large-v3",
+  "openai/whisper-large-v3-turbo",
+  "openai/whisper-large-v2",
+];
+
+// Try both URL patterns per model:
+//   1. New router (Inference Providers, current)
+//   2. Old api-inference (legacy, still works for some models)
+function hfUrls(model: string): string[] {
+  return [
+    `https://router.huggingface.co/hf-inference/models/${model}`,
+    `https://api-inference.huggingface.co/models/${model}`,
+  ];
+}
 
 // HF Inference API accepts audio in the request body.
-// We send raw bytes + let it auto-detect the format.
+// Content-Type must describe the actual audio format so ffmpeg inside HF
+// can decode it. For MPEG-TS (from plenario-cron) and WebM (from browser
+// MediaRecorder) we use octet-stream and let HF auto-detect; this mirrors
+// what worked reliably before the 2025 router migration.
 async function transcribeWithHF(
   audioBytes: Uint8Array,
   hfToken: string,
 ): Promise<string> {
-  const resp = await fetch(HF_API, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${hfToken}`,
-      "Content-Type": "application/octet-stream",
-      // Ask Whisper to return the full text (not streaming)
-      "X-Wait-For-Model": "true",
-    },
-    body: audioBytes,
-  });
+  const errors: string[] = [];
 
-  if (!resp.ok) {
-    const err = await resp.text();
-    // Model may be loading — retry hint included in response
-    throw new Error(`HF API ${resp.status}: ${err.slice(0, 300)}`);
+  for (const model of WHISPER_MODELS) {
+    for (const url of hfUrls(model)) {
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization:  `Bearer ${hfToken}`,
+            "Content-Type": "application/octet-stream",
+            // Ask HF to wait for the model to load instead of returning 503
+            "X-Wait-For-Model": "true",
+          },
+          body: audioBytes,
+          signal: AbortSignal.timeout(60_000),
+        });
+
+        if (resp.status === 503) {
+          // Model is spinning up — the X-Wait-For-Model header usually prevents
+          // this, but note it and fall through to try the next URL/model.
+          errors.push(`${model} @ ${url.slice(8, 50)}: 503 model loading`);
+          continue;
+        }
+
+        if (resp.status === 410 || resp.status === 404) {
+          // Endpoint removed/gone — skip this URL, try next one.
+          errors.push(`${model} @ ${url.slice(8, 50)}: ${resp.status} endpoint gone`);
+          continue;
+        }
+
+        if (!resp.ok) {
+          // Non-retryable error — read body for detail (might be HTML or JSON)
+          const body = await resp.text();
+          const detail = body.startsWith("<")
+            ? `HTTP ${resp.status} (HTML response — check HF token permissions)`
+            : `HTTP ${resp.status}: ${body.slice(0, 200)}`;
+          errors.push(`${model}: ${detail}`);
+          // Non-410/503 errors may be auth/quota issues — don't retry other models
+          throw new Error(errors.join(" | "));
+        }
+
+        // Parse response — shape: { text: "..." } or [{ text: "..." }]
+        const json = await resp.json();
+        if (typeof json?.text === "string") return json.text.trim();
+        if (Array.isArray(json) && json[0]?.text) return json[0].text.trim();
+        throw new Error(`Unexpected HF response: ${JSON.stringify(json).slice(0, 200)}`);
+
+      } catch (e) {
+        if (e instanceof Error && e.message.includes(" | ")) throw e; // already formatted
+        errors.push(`${model} @ ${url.slice(8, 50)}: ${(e as Error)?.message ?? e}`);
+      }
+    }
   }
 
-  const json = await resp.json();
-  // Response shape: { text: "..." }  or  [{ text: "..." }]
-  if (typeof json?.text === "string") return json.text.trim();
-  if (Array.isArray(json) && json[0]?.text) return json[0].text.trim();
-  throw new Error(`Unexpected HF response: ${JSON.stringify(json).slice(0, 200)}`);
+  // All models and URLs exhausted
+  throw new Error(`All HF endpoints failed: ${errors.join(" | ")}`);
 }
 
 // ─── HLS audio fetcher ───────────────────────────────────────────────────────
@@ -297,8 +351,15 @@ Deno.serve(async (req: Request) => {
     try {
       text = await transcribeWithHF(audioBytes, HF_TOKEN);
     } catch (e) {
-      // Model loading — tell the caller to retry
-      return Response.json({ error: String(e), retry_after: 20 }, { status: 503, headers: CORS_HEADERS });
+      const msg = String(e);
+      // Only return 503 (retry) when the model is genuinely loading.
+      // 410/404 endpoint-gone errors used to be silently wrapped as 503,
+      // which hid the real cause and caused infinite "model loading" loops.
+      const isLoading = msg.includes("503") || msg.includes("model loading");
+      return Response.json(
+        { error: msg, retry_after: isLoading ? 20 : null },
+        { status: isLoading ? 503 : 502, headers: CORS_HEADERS },
+      );
     }
 
     const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
