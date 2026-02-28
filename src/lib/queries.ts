@@ -291,6 +291,84 @@ export function useRefreshPoliticianStats() {
   });
 }
 
+// ─── Plenário historic sessions ───────────────────────────────────────────────
+
+export interface PlenarioSession {
+  id: string;
+  date: string;
+  legislatura: string | null;
+  dar_url: string | null;
+  session_number: number | null;
+  status: string;
+  speech_count?: number;
+}
+
+export function usePlenarioSessions(legislatura = "XVII") {
+  return useQuery({
+    queryKey: ["plenario_sessions", legislatura],
+    queryFn: async (): Promise<PlenarioSession[]> => {
+      const { data: sessions, error } = await supabase
+        .from("sessions")
+        .select("id, date, legislatura, dar_url, session_number, status")
+        .eq("legislatura", legislatura)
+        .order("date", { ascending: false })
+        .limit(200);
+
+      if (error) throw error;
+      if (!sessions?.length) return [];
+
+      const sessionIds = sessions.map(s => s.id);
+      const { data: speechCounts } = await supabase
+        .from("speeches")
+        .select("session_id")
+        .in("session_id", sessionIds);
+
+      const countMap: Record<string, number> = {};
+      for (const row of speechCounts ?? []) {
+        countMap[row.session_id] = (countMap[row.session_id] ?? 0) + 1;
+      }
+
+      return sessions.map(s => ({
+        ...(s as any),
+        speech_count: countMap[s.id] ?? 0,
+      })) as PlenarioSession[];
+    },
+    staleTime: 30_000,
+  });
+}
+
+export interface PlenarioImportJob {
+  id: string;
+  legislatura: string;
+  status: string;
+  total_sessions: number;
+  sessions_processed: number;
+  speeches_inserted: number;
+  current_session: string | null;
+  error_message: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export function usePlenarioImportJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["plenario_import_job", jobId],
+    queryFn: async (): Promise<PlenarioImportJob | null> => {
+      if (!jobId) return null;
+      const { data, error } = await supabase
+        .from("plenario_import_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .single();
+      if (error) return null;
+      return data as unknown as PlenarioImportJob;
+    },
+    enabled: !!jobId,
+    refetchInterval: 3000,
+    staleTime: 0,
+  });
+}
+
 export function useFillerTrend() {
   return useQuery({
     queryKey: ["filler_trend"],
