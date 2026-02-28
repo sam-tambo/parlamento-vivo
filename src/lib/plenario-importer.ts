@@ -228,6 +228,7 @@ function pickResource(resources: CkanResource[]): FoundResource | null {
 }
 
 const KNOWN_SLUGS = [
+  // Most likely based on CKAN conventions for PT parliament
   "interv-pleno-dal",
   "intervencoes-plenario",
   "intervencoes-em-plenario",
@@ -235,7 +236,15 @@ const KNOWN_SLUGS = [
   "interven-plenario",
   "dai-plenario",
   "dar-plenario",
+  "atividade-parlamentar-intervencoes-plenario",
+  "discursos-plenario",
+  "sessoes-plenarias",
+  "sessoes-plenario",
+  "reunioes-plenarias",
+  "destaques-plenario",
 ];
+
+const PLENARY_RE = /plen|interven|discur|sessao|reuni|dar[^e]/i;
 
 async function findResource(legislatura: string): Promise<FoundResource | null> {
   // 1. Try known slugs directly (package_show is faster than search)
@@ -249,11 +258,40 @@ async function findResource(legislatura: string): Promise<FoundResource | null> 
     }
   }
 
-  // 2. Full-text search with multiple query terms
+  // 2. Enumerate ALL packages and filter by name (most thorough)
+  const allPkgs = await fetchJson<{ success: boolean; result: string[] }>(
+    `${CKAN}/package_list`
+  );
+  if (allPkgs?.success && allPkgs.result?.length) {
+    const candidates = allPkgs.result.filter(n => PLENARY_RE.test(n));
+    console.log(`[importer] CKAN package_list: ${candidates.length} candidate(s):`, candidates);
+    for (const slug of candidates) {
+      const pkg = await fetchJson<{ success: boolean; result: CkanPackage }>(
+        `${CKAN}/package_show?id=${slug}`
+      );
+      if (pkg?.success && pkg.result?.resources?.length) {
+        const found = pickResource(pkg.result.resources);
+        if (found) { console.log(`[importer] package_list hit: ${slug}`); return found; }
+      }
+    }
+    // If no resource in plenary-named packages, try the first package with any downloadable resource
+    // (sometimes the portal has one big dataset with all interventions)
+    for (const slug of allPkgs.result) {
+      const pkg = await fetchJson<{ success: boolean; result: CkanPackage }>(
+        `${CKAN}/package_show?id=${slug}`
+      );
+      if (pkg?.success && pkg.result?.resources?.length) {
+        const label = (pkg.result.name + " " + pkg.result.title).toLowerCase();
+        if (!PLENARY_RE.test(label)) continue;
+        const found = pickResource(pkg.result.resources);
+        if (found) { console.log(`[importer] package_list full hit: ${slug}`); return found; }
+      }
+    }
+  }
+
+  // 3. Full-text search with multiple query terms
   const searchTerms = [
-    "intervenc%CC%A7o%CC%83es+plen%C3%A1rio",  // intervenções plenário (NFC)
     "intervencoes+plenario",
-    "interven%C3%A7%C3%B5es",
     "plenario",
     "atividade+parlamentar",
     "DAR",
@@ -263,7 +301,7 @@ async function findResource(legislatura: string): Promise<FoundResource | null> 
     const pkgs = await ckanSearch(term);
     for (const pkg of pkgs) {
       const label = (pkg.name + " " + pkg.title).toLowerCase();
-      if (!/plen|intervenc|interven|dar|atividade/i.test(label)) continue;
+      if (!PLENARY_RE.test(label)) continue;
       const found = pickResource(pkg.resources ?? []);
       if (found) { console.log(`[importer] CKAN search hit: ${pkg.name}`); return found; }
     }
@@ -337,20 +375,32 @@ async function speechesFromCsv(
 // create session records in the DB from the parliament's own API.
 
 async function sessionDatesFromParliamentApi(legislatura: string): Promise<string[]> {
+  // Try several known parliament.pt API endpoints for session/DAR publications
   const endpoints = [
     `https://www.parlamento.pt/API/ApiActDar/GetDarPublicacoes?type=DAR1S&leg=${legislatura}`,
+    `https://www.parlamento.pt/API/ApiActDar/GetDarPublicacoes?type=DAR1S&legislatura=${legislatura}`,
     `https://app.parlamento.pt/api/DAR/publicacoes?tipo=DAR1S&leg=${legislatura}`,
+    `https://www.parlamento.pt/API/ApiSDAR/GetPublicacoesDar?tipo=DAR1S&leg=${legislatura}`,
+    `https://www.parlamento.pt/API/ApiSDAR/GetPublicacoesDar?tipo=I+Serie&legislatura=${legislatura}`,
   ];
   for (const url of endpoints) {
-    const data = await fetchJson<unknown[]>(url);
-    if (!Array.isArray(data) || !data.length) continue;
-    const dates = data
+    const raw = await fetchJson<unknown>(url);
+    // Could be { result: [...] } or just [...]
+    const arr = Array.isArray(raw) ? raw : (raw as Record<string,unknown>)?.result
+      ?? (raw as Record<string,unknown>)?.data ?? null;
+    if (!Array.isArray(arr) || !arr.length) continue;
+    const dates = arr
       .map((p: unknown) => {
         const pub = p as Record<string, unknown>;
-        return normaliseDate(String(pub.data ?? pub.dataPublicacao ?? pub.date ?? ""));
+        const raw = pub.data ?? pub.dataPublicacao ?? pub.DataPublicacao
+          ?? pub.DataSessao ?? pub.dataSessao ?? pub.date ?? "";
+        return normaliseDate(String(raw));
       })
       .filter(Boolean);
-    if (dates.length) { console.log(`[importer] Parliament API: ${dates.length} sessions`); return dates; }
+    if (dates.length) {
+      console.log(`[importer] Parliament API ${url}: ${dates.length} sessions`);
+      return [...new Set(dates)]; // deduplicate
+    }
   }
   return [];
 }
