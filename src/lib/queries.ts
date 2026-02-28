@@ -74,11 +74,15 @@ export function useSpeeches(partyFilter?: string | null) {
       if (error) throw error;
 
       if (data && data.length > 0) {
-        const mapped = data.map((s: any) => ({
-          ...s,
-          session_date: s.session?.date ?? null,
-          filler_words_detail: s.filler_words_detail as Record<string, number> | null,
-        })) as Speech[];
+        // Filter out speeches where politician join returned null
+        // (happens when politician_id is null after making the column nullable)
+        const mapped = data
+          .filter((s: any) => s.politician != null)
+          .map((s: any) => ({
+            ...s,
+            session_date: s.session?.date ?? null,
+            filler_words_detail: s.filler_words_detail as Record<string, number> | null,
+          })) as Speech[];
         if (partyFilter) return mapped.filter(s => s.politician.party === partyFilter);
         return mapped;
       }
@@ -307,17 +311,35 @@ export function usePlenarioSessions(legislatura = "XVII") {
   return useQuery({
     queryKey: ["plenario_sessions", legislatura],
     queryFn: async (): Promise<PlenarioSession[]> => {
-      const { data: sessions, error } = await supabase
+      // Try querying with legislatura column (available after migration 011).
+      // If the column doesn't exist yet, fall back to status-based filter so
+      // the page still renders without crashing.
+      let sessions: any[] | null = null;
+
+      const { data: withLeg, error: legErr } = await supabase
         .from("sessions")
         .select("id, date, legislatura, dar_url, session_number, status")
         .eq("legislatura", legislatura)
         .order("date", { ascending: false })
         .limit(200);
 
-      if (error) throw error;
+      if (!legErr) {
+        sessions = withLeg;
+      } else {
+        // Column doesn't exist yet — show all completed sessions as fallback
+        const { data: fallback } = await supabase
+          .from("sessions")
+          .select("id, date, status")
+          .eq("status", "completed")
+          .order("date", { ascending: false })
+          .limit(200);
+        sessions = fallback ?? [];
+      }
+
       if (!sessions?.length) return [];
 
-      const sessionIds = sessions.map(s => s.id);
+      // Count speeches per session
+      const sessionIds = sessions.map((s: any) => s.id);
       const { data: speechCounts } = await supabase
         .from("speeches")
         .select("session_id")
@@ -328,8 +350,13 @@ export function usePlenarioSessions(legislatura = "XVII") {
         countMap[row.session_id] = (countMap[row.session_id] ?? 0) + 1;
       }
 
-      return sessions.map(s => ({
-        ...(s as any),
+      return sessions.map((s: any) => ({
+        id: s.id,
+        date: s.date,
+        legislatura: s.legislatura ?? null,
+        dar_url: s.dar_url ?? null,
+        session_number: s.session_number ?? null,
+        status: s.status,
         speech_count: countMap[s.id] ?? 0,
       })) as PlenarioSession[];
     },

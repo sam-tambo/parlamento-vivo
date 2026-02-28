@@ -535,36 +535,57 @@ async function findOrCreateSession(
 ): Promise<string | null> {
   if (!date) return null;
 
-  // Look for existing session on this date
+  // Look for existing session on this date (don't filter by legislatura —
+  // the column may not yet exist in the live DB before migration 011 runs)
   const { data: existing } = await supabase
     .from("sessions")
     .select("id")
     .eq("date", date)
-    .eq("legislatura", legislatura)
     .limit(1)
     .maybeSingle();
 
   if (existing) return existing.id as string;
 
-  // Create new historic session
+  // Create new historic session — try with new columns first,
+  // fall back to basic columns if migration 011 hasn't run yet.
+  const fullPayload = {
+    date,
+    legislatura,
+    status: "completed",
+    transcript_status: "completed",
+    dar_url: darUrl ?? null,
+    session_number: sessionNumber ?? null,
+  };
+
   const { data: created, error } = await supabase
     .from("sessions")
-    .insert({
-      date,
-      legislatura,
-      status: "completed",          // historic — already happened
-      transcript_status: "completed",
-      dar_url: darUrl ?? null,
-      session_number: sessionNumber ?? null,
-    })
+    .insert(fullPayload)
     .select("id")
     .single();
 
-  if (error) {
-    console.error(`[scrape-plenario] Error creating session for ${date}:`, error.message);
+  if (!error) return created.id as string;
+
+  // If error mentions unknown columns (migration 011 not yet applied), retry
+  // without the new columns so speeches can still be stored.
+  if (
+    error.message.includes("legislatura") ||
+    error.message.includes("dar_url") ||
+    error.message.includes("session_number") ||
+    error.message.includes("column") ||
+    error.code === "42703"  // PostgreSQL: undefined_column
+  ) {
+    const { data: fallback, error: e2 } = await supabase
+      .from("sessions")
+      .insert({ date, status: "completed", transcript_status: "completed" })
+      .select("id")
+      .single();
+    if (!e2 && fallback) return fallback.id as string;
+    console.error(`[scrape-plenario] Session fallback insert failed:`, e2?.message);
     return null;
   }
-  return created.id as string;
+
+  console.error(`[scrape-plenario] Error creating session for ${date}:`, error.message);
+  return null;
 }
 
 async function insertSpeech(
@@ -577,22 +598,33 @@ async function insertSpeech(
   const totalWords = speech.text.split(/\s+/).filter(Boolean).length;
   const fillerRatio = totalWords > 0 ? count / totalWords : 0;
 
-  const { error } = await supabase.from("speeches").insert({
+  // politician_id may be null when speaker name couldn't be matched.
+  // After migration 010 this column is nullable; before that migration,
+  // only insert when we have a politician ID to avoid NOT NULL errors.
+  const payload: Record<string, unknown> = {
     session_id: sessionId,
-    politician_id: politicianId ?? undefined,
     speaking_duration_seconds: (speech.duration_minutes ?? 0) * 60,
     filler_word_count: count,
     total_word_count: totalWords,
     filler_ratio: fillerRatio,
     transcript_excerpt: speech.text.slice(0, 500),
     filler_words_detail: words,
-  });
+  };
+  if (politicianId) payload.politician_id = politicianId;
+
+  const { error } = await supabase.from("speeches").insert(payload);
 
   if (error) {
-    // Ignore FK violations (politician not in DB is expected for some speakers)
-    if (!error.message.includes("violates foreign key")) {
-      console.warn("[scrape-plenario] Speech insert error:", error.message);
+    // If politician_id is still NOT NULL in the DB (pre-migration 010) and
+    // we have no match, skip this speech silently — nothing we can do yet.
+    if (
+      error.message.includes("violates not-null") ||
+      error.message.includes("null value in column") ||
+      error.message.includes("violates foreign key")
+    ) {
+      return false;
     }
+    console.warn("[scrape-plenario] Speech insert error:", error.message);
     return false;
   }
   return true;
@@ -724,11 +756,12 @@ Deno.serve(async (req: Request) => {
 
     console.log(`[scrape-plenario] legislatura=${legislatura} batch=${batchSize} offset=${offset}`);
 
-    // Update job status to running
+    // Update job status to running — wrap in try/catch because the
+    // plenario_import_jobs table may not exist before migration 011 runs.
     if (jobId) {
-      await supabase.from("plenario_import_jobs").update({
-        status: "running",
-      }).eq("id", jobId);
+      try {
+        await supabase.from("plenario_import_jobs").update({ status: "running" }).eq("id", jobId);
+      } catch { /* table not yet created */ }
     }
 
     const allErrors: string[] = [];
@@ -760,14 +793,16 @@ Deno.serve(async (req: Request) => {
     const done = total_sessions > 0 && (offset + batchSize) >= total_sessions;
 
     if (jobId) {
-      await supabase.from("plenario_import_jobs").update({
-        sessions_processed: offset + sessions_processed,
-        speeches_inserted,
-        total_sessions,
-        status: done ? "completed" : allErrors.length > 0 && sessions_processed === 0 ? "error" : "running",
-        error_message: allErrors.length > 0 ? allErrors.join("; ") : null,
-        completed_at: done ? new Date().toISOString() : null,
-      }).eq("id", jobId);
+      try {
+        await supabase.from("plenario_import_jobs").update({
+          sessions_processed: offset + sessions_processed,
+          speeches_inserted,
+          total_sessions,
+          status: done ? "completed" : allErrors.length > 0 && sessions_processed === 0 ? "error" : "running",
+          error_message: allErrors.length > 0 ? allErrors.join("; ") : null,
+          completed_at: done ? new Date().toISOString() : null,
+        }).eq("id", jobId);
+      } catch { /* plenario_import_jobs table not yet created — non-fatal */ }
     }
 
     return Response.json({
