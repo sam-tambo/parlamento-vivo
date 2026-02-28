@@ -74,16 +74,61 @@ export type Database = {
         }
         Relationships: []
       }
+      plenario_import_jobs: {
+        Row: {
+          id: string
+          legislatura: string
+          status: string
+          total_sessions: number
+          sessions_processed: number
+          speeches_inserted: number
+          current_session: string | null
+          error_message: string | null
+          started_at: string
+          completed_at: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          legislatura?: string
+          status?: string
+          total_sessions?: number
+          sessions_processed?: number
+          speeches_inserted?: number
+          current_session?: string | null
+          error_message?: string | null
+          started_at?: string
+          completed_at?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          legislatura?: string
+          status?: string
+          total_sessions?: number
+          sessions_processed?: number
+          speeches_inserted?: number
+          current_session?: string | null
+          error_message?: string | null
+          started_at?: string
+          completed_at?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
       sessions: {
         Row: {
           artv_stream_url: string | null
           artv_video_url: string | null
           created_at: string
+          dar_url: string | null
           date: string
           end_time: string | null
           id: string
           last_hls_segment: string | null
           last_hls_sequence: number | null
+          legislatura: string | null
+          session_number: number | null
           start_time: string | null
           status: string
           total_filler_count: number | null
@@ -94,11 +139,14 @@ export type Database = {
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
+          dar_url?: string | null
           date: string
           end_time?: string | null
           id?: string
           last_hls_segment?: string | null
           last_hls_sequence?: number | null
+          legislatura?: string | null
+          session_number?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -109,11 +157,14 @@ export type Database = {
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
+          dar_url?: string | null
           date?: string
           end_time?: string | null
           id?: string
           last_hls_segment?: string | null
           last_hls_sequence?: number | null
+          legislatura?: string | null
+          session_number?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
