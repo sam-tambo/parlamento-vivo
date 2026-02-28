@@ -215,7 +215,7 @@ async function identifySpeakerFromText(
       const { data } = await supabase
         .from("politicians")
         .select("id, name")
-        .or(`name.ilike.%${word}%,full_name.ilike.%${word}%`)
+        .ilike("name", `%${word}%`)
         .limit(1)
         .maybeSingle();
       if (data) {
