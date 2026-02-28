@@ -120,15 +120,15 @@ export function useTranscriptEvents(sessionId?: string | null) {
     queryKey: ["transcript_events", sessionId],
     queryFn: async (): Promise<TranscriptEvent[]> => {
       let q = supabase
-        .from("transcript_events" as any)
+        .from("transcript_events")
         .select("*, politician:politicians(*)")
         .order("created_at", { ascending: false })
         .limit(50);
-      if (sessionId) q = (q as any).eq("session_id", sessionId);
+      if (sessionId) q = q.eq("session_id", sessionId);
 
-      const { data, error } = await (q as any);
+      const { data, error } = await q;
       if (error) return [];
-      return (data ?? []) as TranscriptEvent[];
+      return (data ?? []) as unknown as TranscriptEvent[];
     },
     staleTime: 0,
     refetchInterval: 5000,
@@ -146,15 +146,15 @@ export function useTranscriptRealtime(
     const channel = supabase
       .channel("transcript_events_live")
       .on(
-        "postgres_changes" as any,
+        "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "transcript_events",
           ...(sessionId ? { filter: `session_id=eq.${sessionId}` } : {}),
         },
-        async (payload: any) => {
-          const ev = payload.new as TranscriptEvent;
+        async (payload) => {
+          const ev = payload.new as unknown as TranscriptEvent;
           // Fetch politician if present
           if (ev.politician_id) {
             const { data } = await supabase

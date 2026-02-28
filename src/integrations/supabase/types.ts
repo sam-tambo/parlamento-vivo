@@ -44,6 +44,7 @@ export type Database = {
           total_filler_count: number
           total_speaking_seconds: number
           total_speeches: number
+          total_words: number
         }
         Insert: {
           average_filler_ratio?: number
@@ -56,6 +57,7 @@ export type Database = {
           total_filler_count?: number
           total_speaking_seconds?: number
           total_speeches?: number
+          total_words?: number
         }
         Update: {
           average_filler_ratio?: number
@@ -68,6 +70,7 @@ export type Database = {
           total_filler_count?: number
           total_speaking_seconds?: number
           total_speeches?: number
+          total_words?: number
         }
         Relationships: []
       }
@@ -79,6 +82,8 @@ export type Database = {
           date: string
           end_time: string | null
           id: string
+          last_hls_segment: string | null
+          last_hls_sequence: number | null
           start_time: string | null
           status: string
           total_filler_count: number | null
@@ -92,6 +97,8 @@ export type Database = {
           date: string
           end_time?: string | null
           id?: string
+          last_hls_segment?: string | null
+          last_hls_sequence?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -105,6 +112,8 @@ export type Database = {
           date?: string
           end_time?: string | null
           id?: string
+          last_hls_segment?: string | null
+          last_hls_sequence?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -167,12 +176,73 @@ export type Database = {
           },
         ]
       }
+      transcript_events: {
+        Row: {
+          created_at: string
+          duration_seconds: number | null
+          filler_count: number
+          filler_words_found: Json
+          id: string
+          politician_id: string | null
+          session_id: string | null
+          start_seconds: number | null
+          text_segment: string
+          total_words: number
+        }
+        Insert: {
+          created_at?: string
+          duration_seconds?: number | null
+          filler_count?: number
+          filler_words_found?: Json
+          id?: string
+          politician_id?: string | null
+          session_id?: string | null
+          start_seconds?: number | null
+          text_segment: string
+          total_words?: number
+        }
+        Update: {
+          created_at?: string
+          duration_seconds?: number | null
+          filler_count?: number
+          filler_words_found?: Json
+          id?: string
+          politician_id?: string | null
+          session_id?: string | null
+          start_seconds?: number | null
+          text_segment?: string
+          total_words?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "transcript_events_politician_id_fkey"
+            columns: ["politician_id"]
+            isOneToOne: false
+            referencedRelation: "politicians"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "transcript_events_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      refresh_all_politician_stats: {
+        Args: Record<PropertyKey, never>
+        Returns: Json
+      }
+      refresh_politician_stats: {
+        Args: { p_id: string }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
