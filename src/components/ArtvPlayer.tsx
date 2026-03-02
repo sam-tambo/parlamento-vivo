@@ -27,6 +27,7 @@ import Hls from "hls.js";
 import { useRef, useEffect, useState, useCallback, useLayoutEffect } from "react";
 import { Loader2, ExternalLink, WifiOff, RefreshCw, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { segmentTranscript, CATEGORY_COLORS } from "@/lib/filler-words";
 
 // ── Confirmed stream URLs (iptv-org/iptv pt.m3u — community-maintained) ──────
 const ARTV_PRIMARY =
@@ -53,9 +54,12 @@ interface ArtvPlayerProps {
   /** Called every time the video element starts/resumes playing.
    *  Parent guards against duplicate capture starts with captureActiveRef. */
   onReady?: (video: HTMLVideoElement) => void;
+  /** Latest transcription text — rendered as live subtitle overlay.
+   *  Filler words are highlighted in their category colour. */
+  subtitle?: string | null;
 }
 
-export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
+export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlayerProps) {
   const videoRef  = useRef<HTMLVideoElement>(null);
   const hlsRef    = useRef<Hls | null>(null);
 
@@ -209,6 +213,9 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
     setAttempt(n => n + 1);
   };
 
+  // Pre-segment subtitle text so we don't re-compute on every render tick.
+  const subtitleSegments = subtitle ? segmentTranscript(subtitle) : [];
+
   return (
     <div className="relative bg-black" style={{ paddingTop: "56.25%" }}>
       {/* <video muted> allows autoplay without user gesture.
@@ -221,6 +228,54 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady }: ArtvPlayerProps) {
         playsInline
         style={{ display: status === "error" ? "none" : "block" }}
       />
+
+      {/* ── Live subtitle overlay ──────────────────────────────────────────
+          Positioned above the native video controls (~56 px from bottom).
+          Black semi-transparent pill; filler words highlighted in colour. */}
+      {subtitle && subtitleSegments.length > 0 && status !== "error" && (
+        <div
+          className="absolute left-2 right-2 z-10 pointer-events-none flex justify-center"
+          style={{ bottom: "60px" }}
+        >
+          <div
+            className="rounded-lg px-4 py-2 max-w-[92%] text-center"
+            style={{
+              background: "rgba(0,0,0,0.78)",
+              backdropFilter: "blur(4px)",
+              boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
+            }}
+          >
+            <p
+              className="leading-snug font-semibold"
+              style={{
+                fontSize: "clamp(0.82rem, 1.8vw, 1.05rem)",
+                color: "#fff",
+                textShadow: "0 1px 4px rgba(0,0,0,0.9)",
+              }}
+            >
+              {subtitleSegments.map((seg, i) =>
+                seg.isFiller && seg.fillerWord ? (
+                  <span
+                    key={i}
+                    style={{
+                      color: CATEGORY_COLORS[seg.fillerWord.category],
+                      fontWeight: 700,
+                      textDecoration: "underline",
+                      textDecorationStyle: "dotted",
+                      textUnderlineOffset: "3px",
+                    }}
+                    title={`enchimento · ${seg.fillerWord.category}`}
+                  >
+                    {seg.text}
+                  </span>
+                ) : (
+                  <span key={i}>{seg.text}</span>
+                )
+              )}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Loading overlay */}
       {status === "loading" && (
