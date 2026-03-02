@@ -102,18 +102,14 @@ async function transcribeWithHF(
   for (const model of WHISPER_MODELS) {
     for (const url of hfUrls(model)) {
       try {
-        // HF now requires multipart/form-data with a file field
-        const formData = new FormData();
-        const blob = new Blob([audioBytes], { type: "audio/mpeg" });
-        formData.append("file", blob, "audio.mp3");
-
         const resp = await fetch(url, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${hfToken}`,
+            "Content-Type": "audio/mpeg",
             "X-Wait-For-Model": "true",
           },
-          body: formData,
+          body: audioBytes as unknown as BodyInit,
           signal: AbortSignal.timeout(60_000),
         });
 
