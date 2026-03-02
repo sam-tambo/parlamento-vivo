@@ -34,20 +34,26 @@ type CronState = "idle" | "starting" | "running" | "ok" | "waiting" | "error";
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
+// How long each audio chunk should be (seconds).  Lower = faster subtitles.
+const CHUNK_SECONDS = 15;
+
 export default function AoVivo() {
   const [events, setEvents]             = useState<LiveEvent[]>([]);
   const [cronState, setCronState]       = useState<CronState>("idle");
   const [cronMsg, setCronMsg]           = useState<string>("A aguardar vídeo…");
   const [videoReady, setVideoReady]     = useState(false);
   const [sessionStats, setSessionStats] = useState({ totalFillers: 0, totalWords: 0, duration: 0, eventCount: 0 });
+  // Current subtitle shown on the video — cleared after CHUNK_SECONDS of silence
+  const [subtitle, setSubtitle]         = useState<string>("");
 
-  const feedRef          = useRef<HTMLDivElement>(null);
-  const seenIds          = useRef(new Set<string>());
-  const captureActiveRef = useRef(false);
-  const recorderRef      = useRef<MediaRecorder | null>(null);
-  const audioStreamRef   = useRef<MediaStream | null>(null);
-  const audioCtxRef      = useRef<AudioContext | null>(null);
-  const captureVideoRef  = useRef<HTMLVideoElement | null>(null);
+  const feedRef           = useRef<HTMLDivElement>(null);
+  const seenIds           = useRef(new Set<string>());
+  const captureActiveRef  = useRef(false);
+  const recorderRef       = useRef<MediaRecorder | null>(null);
+  const audioStreamRef    = useRef<MediaStream | null>(null);
+  const audioCtxRef       = useRef<AudioContext | null>(null);
+  const captureVideoRef   = useRef<HTMLVideoElement | null>(null);
+  const subtitleTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Always-fresh session ID — updated whenever useActiveSession resolves/changes.
   // Using a ref prevents stale-closure bugs in the sendChunk/recordChunk chain.
@@ -71,10 +77,21 @@ export default function AoVivo() {
     setSessionStats(s => ({
       totalFillers: s.totalFillers + ev.filler_count,
       totalWords:   s.totalWords   + ev.total_words,
-      duration:     s.duration     + (ev.duration_seconds ?? 30),
+      duration:     s.duration     + (ev.duration_seconds ?? CHUNK_SECONDS),
       eventCount:   s.eventCount   + 1,
     }));
-  }, []);
+
+    // ── Update subtitle on video ────────────────────────────────────────────
+    if (ev.text_segment?.trim()) {
+      setSubtitle(ev.text_segment);
+      // Auto-clear after slightly longer than one chunk so there's no blank gap
+      if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
+      subtitleTimerRef.current = setTimeout(
+        () => setSubtitle(""),
+        (CHUNK_SECONDS + 5) * 1000
+      );
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Send one 30-second audio chunk to the transcribe edge function ────────
   //
@@ -232,7 +249,7 @@ export default function AoVivo() {
     }
 
     recorderRef.current = rec;
-    setTimeout(() => { if (rec.state === "recording") rec.stop(); }, 30_000);
+    setTimeout(() => { if (rec.state === "recording") rec.stop(); }, CHUNK_SECONDS * 1_000);
   }, [sendChunk]);
 
   // ── Start browser audio capture from the <video> element ─────────────────
@@ -316,7 +333,7 @@ export default function AoVivo() {
       // captureActiveRef.current is already true (set at the start)
 
       setCronState("running");
-      setCronMsg("Captura ativa — primeiro resultado em ~30 s");
+      setCronMsg(`Captura ativa — primeiro resultado em ~${CHUNK_SECONDS} s`);
       recordChunk(audioStream);
 
     } catch (e) {
@@ -409,6 +426,7 @@ export default function AoVivo() {
       captureActiveRef.current = false;
       recorderRef.current?.stop();
       audioCtxRef.current?.close();
+      if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
     };
   }, []);
 
@@ -549,10 +567,11 @@ export default function AoVivo() {
               </div>
             </div>
 
-            {/* hls.js player */}
+            {/* hls.js player + live subtitle overlay */}
             <ArtvPlayer
               streamUrl={activeSession?.artv_stream_url}
               onReady={handleVideoReady}
+              subtitle={subtitle || null}
             />
 
             {/* Status bar */}
@@ -603,7 +622,7 @@ export default function AoVivo() {
                   <Radio className="h-8 w-8 mx-auto mb-3 opacity-40" />
                   <p>À espera de transcrições…</p>
                   <p className="text-xs mt-2 opacity-60">
-                    O Whisper processa chunks de 30 s — os primeiros resultados aparecem em ~30–60 s
+                    Whisper processa chunks de {CHUNK_SECONDS} s — primeiro resultado em ~{CHUNK_SECONDS + 10} s
                   </p>
                   {!videoReady && (
                     <p className="text-xs mt-1 opacity-60">
