@@ -11,7 +11,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { PARTY_COLORS } from "@/lib/mock-data";
 import { segmentTranscript, gradeFillerRate, CATEGORY_COLORS } from "@/lib/filler-words";
 import { useActiveSession, useTranscriptEvents, useTranscriptRealtime, type TranscriptEvent } from "@/lib/queries";
-import { ArtvPlayer } from "@/components/ArtvPlayer";
+import { ArtvPlayer, VIDEO_DELAY_SEC } from "@/components/ArtvPlayer";
 
 // ─── Supabase credentials (public anon key — safe to expose) ────────────────
 const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL as string;
@@ -350,36 +350,66 @@ export default function AoVivo() {
     }
   }, [recordChunk]);
 
+  // ── Live stream callback — preferred capture source ───────────────────────
+  // Called by ArtvPlayer when the hidden LIVE audio element is ready.
+  // Starts audio capture from the live edge (no delay) while the displayed
+  // video is VIDEO_DELAY_SEC behind.  captureActiveRef guards against
+  // duplicate starts from subsequent handleVideoReady calls.
+  const handleLiveStream = useCallback((stream: MediaStream) => {
+    if (captureActiveRef.current) return;
+    captureActiveRef.current = true;
+    audioStreamRef.current = stream;
+    setCronState("running");
+    setCronMsg(
+      `Captura ao vivo ativa (vídeo atrasado ${VIDEO_DELAY_SEC} s) — primeiro resultado em ~${CHUNK_SECONDS} s`
+    );
+    recordChunk(stream);
+  }, [recordChunk]);
+
   // ── onReady callback passed to ArtvPlayer ─────────────────────────────────
-  // Stores the video element and auto-starts capture.
-  // captureActiveRef.current prevents duplicate starts when onPlaying fires
-  // multiple times (rebuffer, seek, manual play after autoplay-block).
+  // Stores the video element and sets videoReady flag.
+  // Starts capture ONLY if the live stream (handleLiveStream) hasn't already
+  // claimed captureActiveRef — this way the live stream is always preferred
+  // and the video element is the fallback.
   const handleVideoReady = useCallback((video: HTMLVideoElement) => {
     captureVideoRef.current = video;
     setVideoReady(true);
-    startCapture(video);
+    if (!captureActiveRef.current) {
+      // Live audio element not ready yet (or disabled) — fall back to the
+      // delayed video element as the audio source.
+      startCapture(video);
+    }
   }, [startCapture]);
 
   // ── Manual capture trigger (retry button) ────────────────────────────────
   const handleManualCapture = useCallback(async () => {
+    // Stop current recorder cleanly.
+    captureActiveRef.current = false;
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
+      await new Promise<void>(r => setTimeout(r, 150));
+    }
+    audioCtxRef.current?.close();
+    audioCtxRef.current = null;
+
+    // Prefer re-using an already-captured live stream if available.
+    if (audioStreamRef.current?.getAudioTracks().some(t => t.readyState === "live")) {
+      captureActiveRef.current = true;
+      setCronState("running");
+      setCronMsg(`Captura ao vivo ativa — novo chunk em ~${CHUNK_SECONDS} s`);
+      recordChunk(audioStreamRef.current);
+      return;
+    }
+
+    // Fall back to re-capturing from the (delayed) video element.
     const video = captureVideoRef.current;
     if (!video) {
       setCronState("error");
       setCronMsg("Vídeo ainda não está pronto — aguarde o início do stream");
       return;
     }
-    // Signal stop FIRST so the old recorder's onstop callback sees
-    // captureActiveRef = false and doesn't interfere with the new capture.
-    captureActiveRef.current = false;
-    if (recorderRef.current?.state === "recording") {
-      recorderRef.current.stop();
-      // Allow onstop to fire and complete before we restart.
-      await new Promise<void>(r => setTimeout(r, 150));
-    }
-    audioCtxRef.current?.close();
-    audioCtxRef.current = null;
     await startCapture(video);
-  }, [startCapture]);
+  }, [startCapture, recordChunk]);
 
   // ── Trigger server-side transcription pipeline directly ──────────────────
   // Calls plenario-cron which discovers the HLS stream and transcribes it
@@ -476,11 +506,11 @@ export default function AoVivo() {
     error:    <AlertCircle className="h-3.5 w-3.5 text-red-400" />,
   }[cronState];
 
-  // Human-readable status bar message (replaces confusing "A aguardar…")
+  // Human-readable status bar message
   const statusBarMsg = isCapturing
-    ? "A capturar áudio do browser · enviando para Whisper large-v3…"
+    ? `A capturar áudio ao vivo · vídeo atrasado ${VIDEO_DELAY_SEC} s · enviando para Whisper…`
     : captureActiveRef.current
-    ? "Captura ativa · resultados a cada 30 s"
+    ? `Captura ativa · vídeo atrasado ${VIDEO_DELAY_SEC} s · resultados a cada ${CHUNK_SECONDS} s`
     : videoReady
     ? "Vídeo pronto · clique em «Iniciar Captura» ou aguarde o início automático"
     : "A aguardar início do stream…";
@@ -567,10 +597,13 @@ export default function AoVivo() {
               </div>
             </div>
 
-            {/* hls.js player + live subtitle overlay */}
+            {/* hls.js player (VIDEO_DELAY_SEC behind live) + live subtitle overlay.
+                onLiveStream feeds audio from the live-edge hidden audio element
+                so transcription is always from real-time, not the delayed video. */}
             <ArtvPlayer
               streamUrl={activeSession?.artv_stream_url}
               onReady={handleVideoReady}
+              onLiveStream={handleLiveStream}
               subtitle={subtitle || null}
             />
 
@@ -677,9 +710,9 @@ export default function AoVivo() {
             <h3 className="font-semibold mb-2 text-sm">Como funciona</h3>
             <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside">
               <li>Stream ARTV via <strong>LiveExtend CDN</strong> · hls.js + proxy</li>
-              <li>Browser capta áudio do vídeo com <strong>MediaRecorder</strong></li>
-              <li>Chunk de 30 s enviado para <strong>Whisper large-v3</strong></li>
-              <li>Enchimentos detectados e pontuados por categoria</li>
+              <li>Vídeo exibido com <strong>{VIDEO_DELAY_SEC} s de atraso</strong> · áudio capturado em tempo real</li>
+              <li>Chunks de {CHUNK_SECONDS} s enviados para <strong>Whisper large-v3</strong></li>
+              <li>Enchimentos detectados e legendas sobrepostas no vídeo</li>
               <li>Resultados em tempo real via <strong>Supabase Realtime</strong></li>
               <li><strong>Servidor</strong>: pipeline paralelo via pg_cron, sem browser</li>
             </ol>

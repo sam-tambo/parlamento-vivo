@@ -47,6 +47,13 @@ const PROXY = (url: string) =>
 
 type Status = "loading" | "playing" | "paused" | "error";
 
+// How many seconds to delay the video display behind the live edge.
+// Configurable via VITE_VIDEO_DELAY_SEC env variable; defaults to 60.
+// A 60-second buffer gives the transcription pipeline ~40 s to process each
+// chunk and have the subtitle ready before the delayed video reaches that moment.
+export const VIDEO_DELAY_SEC =
+  Number(import.meta.env.VITE_VIDEO_DELAY_SEC ?? 60) || 60;
+
 interface ArtvPlayerProps {
   /** Override URL from sessions.artv_stream_url (cached by plenario-cron). */
   streamUrl?: string | null;
@@ -54,19 +61,38 @@ interface ArtvPlayerProps {
   /** Called every time the video element starts/resumes playing.
    *  Parent guards against duplicate capture starts with captureActiveRef. */
   onReady?: (video: HTMLVideoElement) => void;
+  /**
+   * Called once with a MediaStream from a SEPARATE hidden audio element
+   * that plays the stream at the live edge (no delay).  The parent uses this
+   * stream for audio capture so transcriptions are processed in real-time
+   * while the displayed video is delayed by VIDEO_DELAY_SEC.
+   *
+   * If the live audio element fails, the parent falls back to capturing from
+   * the main (delayed) video element via onReady.
+   */
+  onLiveStream?: (stream: MediaStream) => void;
   /** Latest transcription text — rendered as live subtitle overlay.
    *  Filler words are highlighted in their category colour. */
   subtitle?: string | null;
 }
 
-export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlayerProps) {
-  const videoRef  = useRef<HTMLVideoElement>(null);
-  const hlsRef    = useRef<Hls | null>(null);
+export function ArtvPlayer({
+  streamUrl, onStatus, onReady, onLiveStream, subtitle,
+}: ArtvPlayerProps) {
+  const videoRef     = useRef<HTMLVideoElement>(null);
+  const hlsRef       = useRef<Hls | null>(null);
+  // Hidden audio element for the live (non-delayed) audio capture stream.
+  const liveAudioRef = useRef<HTMLAudioElement>(null);
+  const liveHlsRef   = useRef<Hls | null>(null);
+  const liveCtxRef   = useRef<AudioContext | null>(null);
 
-  // Keep the latest onReady prop in a ref so the playing-event listener
-  // always calls the current prop, not the one captured at mount time.
-  const onReadyRef = useRef(onReady);
-  useLayoutEffect(() => { onReadyRef.current = onReady; });
+  // Keep the latest props in refs so event-listener closures are never stale.
+  const onReadyRef      = useRef(onReady);
+  const onLiveStreamRef = useRef(onLiveStream);
+  useLayoutEffect(() => {
+    onReadyRef.current      = onReady;
+    onLiveStreamRef.current = onLiveStream;
+  });
 
   const [status,  setStatus]  = useState<Status>("loading");
   const [attempt, setAttempt] = useState(0);
@@ -106,10 +132,14 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlaye
             xhr.open("GET", PROXY(reqUrl), true);
           }
         },
-        maxBufferLength:       20,
-        liveSyncDurationCount: 3,
-        enableWorker:          true,
-        lowLatencyMode:        false,
+        // liveSyncDuration keeps the player this many seconds behind the live
+        // edge, creating the 60-second buffer the transcription pipeline needs.
+        liveSyncDuration:         VIDEO_DELAY_SEC,
+        liveMaxLatencyDuration:   VIDEO_DELAY_SEC + 15,
+        maxBufferLength:          Math.max(90, VIDEO_DELAY_SEC + 30),
+        maxMaxBufferLength:       Math.max(120, VIDEO_DELAY_SEC + 60),
+        enableWorker:             true,
+        lowLatencyMode:           false,
       });
 
       hlsRef.current = hls;
@@ -150,7 +180,14 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlaye
           console.log("[artv] trying direct CDN:", directUrl);
           hls.stopLoad();
           hls.destroy();
-          const hlsDirect = new Hls({ maxBufferLength: 20, liveSyncDurationCount: 3 });
+          const hlsDirect = new Hls({
+            liveSyncDuration:       VIDEO_DELAY_SEC,
+            liveMaxLatencyDuration: VIDEO_DELAY_SEC + 15,
+            maxBufferLength:        Math.max(90, VIDEO_DELAY_SEC + 30),
+            maxMaxBufferLength:     Math.max(120, VIDEO_DELAY_SEC + 60),
+            enableWorker:           true,
+            lowLatencyMode:         false,
+          });
           hlsRef.current = hlsDirect;
           hlsDirect.loadSource(directUrl);
           hlsDirect.attachMedia(video);
@@ -158,6 +195,7 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlaye
             updateStatus("playing");
             video.play().catch(() => updateStatus("paused"));
           });
+          // Apply the same delay config to the direct fallback
           hlsDirect.on(Hls.Events.ERROR, (_e, d) => {
             if (!d.fatal) return;
             if (fallbackIdx < DIRECT_FALLBACKS.length) {
@@ -207,9 +245,90 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlaye
     updateStatus("error");
   }, [url, attempt, updateStatus]);
 
+  // ── Live audio element — near-live stream for real-time transcription ────
+  // A second hidden HLS instance that stays at the live edge (no delay).
+  // Audio is captured via Web Audio API and passed to onLiveStream so the
+  // parent can send it to Whisper while the displayed video is 60s behind.
+  useEffect(() => {
+    if (!onLiveStreamRef.current) return; // no consumer — skip
+    if (!Hls.isSupported()) return;
+    const audio = liveAudioRef.current;
+    if (!audio) return;
+
+    const hls = new Hls({
+      xhrSetup(xhr, reqUrl) {
+        if (reqUrl.startsWith(SUPABASE_URL)) return;
+        if (reqUrl.startsWith("http") && !reqUrl.includes(window.location.host)) {
+          xhr.open("GET", PROXY(reqUrl), true);
+        }
+      },
+      liveSyncDuration:       3,
+      liveMaxLatencyDuration: 8,
+      maxBufferLength:        20,
+      enableWorker:           true,
+      lowLatencyMode:         false,
+    });
+
+    liveHlsRef.current = hls;
+    hls.loadSource(url);
+    hls.attachMedia(audio);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      audio.muted = true; // keep silent — we only want the audio data
+      audio.play().catch(() => {}); // start buffering / playing silently
+    });
+
+    const onPlaying = async () => {
+      // Give the browser audio pipeline 400 ms to stabilise.
+      await new Promise<void>(r => setTimeout(r, 400));
+
+      const AudioCtx =
+        window.AudioContext ??
+        ((window as any).webkitAudioContext as typeof AudioContext | undefined);
+      if (!AudioCtx) return;
+
+      try {
+        const ctx = new AudioCtx();
+        liveCtxRef.current = ctx;
+        if (ctx.state === "suspended") await ctx.resume().catch(() => {});
+
+        const source = ctx.createMediaElementSource(audio);
+        // Route ONLY to the recording destination, not to speakers.
+        const dest = ctx.createMediaStreamDestination();
+        source.connect(dest);
+
+        const liveTracks = dest.stream.getAudioTracks().filter(
+          t => t.readyState === "live"
+        );
+        if (liveTracks.length) {
+          console.log("[artv-live] live audio stream ready —", liveTracks.length, "track(s)");
+          onLiveStreamRef.current?.(new MediaStream(liveTracks));
+        } else {
+          console.warn("[artv-live] no live audio tracks in Web Audio stream");
+        }
+      } catch (e) {
+        console.warn("[artv-live] Web Audio setup failed:", e);
+      }
+    };
+
+    audio.addEventListener("playing", onPlaying, { once: true });
+
+    return () => {
+      audio.removeEventListener("playing", onPlaying);
+      hls.destroy();
+      liveHlsRef.current = null;
+      liveCtxRef.current?.close();
+      liveCtxRef.current = null;
+    };
+  }, [url]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const retry = () => {
     hlsRef.current?.destroy();
     hlsRef.current = null;
+    liveHlsRef.current?.destroy();
+    liveHlsRef.current = null;
+    liveCtxRef.current?.close();
+    liveCtxRef.current = null;
     setAttempt(n => n + 1);
   };
 
@@ -218,8 +337,14 @@ export function ArtvPlayer({ streamUrl, onStatus, onReady, subtitle }: ArtvPlaye
 
   return (
     <div className="relative bg-black" style={{ paddingTop: "56.25%" }}>
+      {/* Hidden audio element plays the LIVE stream at the live edge.
+          Audio is captured via Web Audio API (no speaker output) and sent
+          to the transcription pipeline while the main <video> is delayed. */}
+      <audio ref={liveAudioRef} aria-hidden="true" style={{ display: "none" }} />
+
       {/* <video muted> allows autoplay without user gesture.
-          startCapture() unmutes it before calling captureStream(). */}
+          startCapture() unmutes it before calling captureStream().
+          liveSyncDuration config keeps playback VIDEO_DELAY_SEC behind live. */}
       <video
         ref={videoRef}
         className="absolute inset-0 w-full h-full"

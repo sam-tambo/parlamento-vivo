@@ -34,32 +34,58 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 // ─── Filler word catalog (mirrors src/lib/filler-words.ts) ───────────────────
+// Keep longest entries first — detection is greedy and non-overlapping.
 
 const FILLER_CATALOG: string[] = [
-  // stallers (longest first for greedy match)
-  "como direi", "de certa forma", "de alguma maneira", "por assim dizer",
-  "de certa maneira", "de algum modo",
-  // connectors
-  "portanto", "ou seja", "de facto", "na verdade",
-  // hesitation / filler
-  "quer dizer", "digamos", "basicamente", "efetivamente",
-  "pronto", "enfim", "olhe", "tipo", "ok", "bem", "ora", "pois",
-  "assim", "então", "depois", "exatamente", "claro",
-  "obviamente", "naturalmente", "certamente", "ah", "eh", "hm",
-].sort((a, b) => b.length - a.length); // longest first
+  // Stallers (longest first)
+  "como é que eu hei de dizer", "a verdade é que", "como é que se diz",
+  "não é verdade", "vamos lá ver", "dito isto",
+  "de qualquer forma", "de alguma forma", "de certa forma",
+  "de alguma maneira", "de certa maneira", "de algum modo",
+  "por assim dizer", "como direi", "está a ver", "se calhar",
+  "no fundo", "por acaso", "repare-se", "olhe que",
+  "pois bem", "pois é", "ora bem", "não é",
+  // Connectors
+  "digamos assim", "ou seja", "quer dizer", "isto é",
+  "de facto", "na verdade", "e então", "portanto",
+  "assim", "então", "depois",
+  // Hesitation
+  "digamos", "humm", "uhm", "ahm", "ehm", "mmm", "hum",
+  "bem", "ora", "pois", "bom", "ah", "eh", "hm", "uh", "um",
+  // Fillers
+  "fundamentalmente", "essencialmente", "honestamente", "sinceramente",
+  "eventualmente", "basicamente", "efetivamente", "obviamente",
+  "naturalmente", "certamente", "exatamente", "percebem", "percebe",
+  "repare", "pronto", "enfim", "claro", "olhe", "tipo", "ok",
+].sort((a, b) => b.length - a.length); // longest first (safety sort)
+
+/** Strip diacritics + lowercase for accent-insensitive matching. */
+function accentStrip(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
 
 function detectFillers(text: string): { count: number; words: Record<string, number> } {
-  let remaining = text.toLowerCase();
+  const normText = accentStrip(text);
   const words: Record<string, number> = {};
+  // Track consumed character ranges to prevent double-counting.
+  const consumed = new Uint8Array(normText.length);
 
   for (const filler of FILLER_CATALOG) {
-    const escaped = filler.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`\\b${escaped}\\b`, "gi");
-    const hits = remaining.match(re);
-    if (hits?.length) {
-      words[filler] = hits.length;
-      remaining = remaining.replace(re, " ".repeat(filler.length));
+    const normFiller = accentStrip(filler);
+    const escaped    = normFiller.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Use lookahead/lookbehind instead of \b — JS \w is ASCII-only and
+    // misses accented chars like ã, é, ç which occur in Portuguese fillers.
+    const re = new RegExp(`(?:^|(?<=[^a-z]))${escaped}(?=[^a-z]|$)`, "gi");
+    let hits = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(normText)) !== null) {
+      const start = m.index, end = start + m[0].length;
+      if (!consumed.subarray(start, end).some(Boolean)) {
+        hits++;
+        consumed.fill(1, start, end);
+      }
     }
+    if (hits > 0) words[filler] = hits;
   }
 
   const count = Object.values(words).reduce((s, n) => s + n, 0);
@@ -228,44 +254,74 @@ async function fetchHLSChunk(
 type SupabaseClient = ReturnType<typeof createClient>;
 
 /**
- * Try to identify the speaker from the transcribed text.
+ * Try to identify the current speaker from the transcribed text.
  *
- * Whisper often captures Portuguese parliamentary address forms in the audio:
- *   "A Sr.ª NOME tem a palavra"
- *   "O Deputado NOME diz que…"
- *   "Ministra NOME, …"
+ * Whisper frequently picks up the parliamentary address formula spoken by
+ * the President of the Assembly:
+ *   "O Sr./A Sr.ª NOME tem a palavra."
+ *   "Tem a palavra o Deputado NOME."
+ *   "Peço a palavra, Sr. Presidente."
+ *   "A Ministra NOME."
  *
- * Extract candidate names from these patterns and fuzzy-match against the
- * `politicians` table (both `name` and `full_name` columns).
- *
- * Returns the matching politician's UUID, or null if none found.
+ * We extract all candidate names and fuzzy-match them against the
+ * `politicians` table.  Priority: full-name match > last-name match.
  */
 async function identifySpeakerFromText(
   text: string,
   supabase: SupabaseClient,
 ): Promise<string | null> {
-  // Patterns common in Portuguese parliamentary audio
-  const patterns = [
-    // "O Sr. / A Sr.ª / A Sra. Nome" — most common in plenary
-    /(?:O\s+Sr\.|A\s+Sr[aª]\.|A\s+Sra\.|O\s+Senhor|A\s+Senhora)\s+([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+(?:\s+(?:de\s+|da\s+|do\s+)?[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+)*)/g,
-    // "Deputad[ao] Nome" / "Ministr[ao] Nome" / "Secretári[ao] Nome"
-    /(?:Deputad[ao]|Ministr[ao]|Secretári[ao]|Presidente)\s+([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+(?:\s+[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][a-záéíóúàâêôãõç]+)*)/g,
+  // ── Pattern bank — extended for full parliamentary vocabulary ─────────────
+  const NAME_PAT =
+    "[A-ZÁÉÍÓÚÀÂÊÔÃÕÇÑ][a-záéíóúàâêôãõçñ]+" +           // first cap word
+    "(?:\\s+(?:de\\s+|da\\s+|do\\s+|dos\\s+|das\\s+)?" + // optional prep
+    "[A-ZÁÉÍÓÚÀÂÊÔÃÕÇÑ][a-záéíóúàâêôãõçñ]+)*";           // further cap words
+
+  const patterns: RegExp[] = [
+    // "O Sr. NOME" / "A Sr.ª NOME" / "A Sra. NOME"
+    new RegExp(`(?:O\\s+Sr\\.|A\\s+Sr[aª]\\.|A\\s+Sra\\.|O\\s+Senhor|A\\s+Senhora)\\s+(${NAME_PAT})`, "g"),
+    // "tem a palavra [o/a] NOME"
+    new RegExp(`tem\\s+a\\s+palavra\\s+(?:o\\s+|a\\s+)?(?:Sr\\.?\\s+|Sr[aª]\\.?\\s+|Deputad[ao]\\s+|Ministr[ao]\\s+)?(${NAME_PAT})`, "gi"),
+    // "Deputad[ao] NOME" / "Ministr[ao] NOME" / "Secretári[ao] NOME"
+    new RegExp(`(?:Deputad[ao]|Ministr[ao]|Secretári[ao]|Vereador[a]?|Presidente)\\s+(${NAME_PAT})`, "g"),
+    // "palavra ao/à NOME" — "dando a palavra ao Deputado NOME"
+    new RegExp(`palavra\\s+(?:ao?|à)\\s+(?:Deputad[ao]\\s+|Ministr[ao]\\s+|Sr\\.?\\s+)?(${NAME_PAT})`, "gi"),
+    // All-caps speaker label (some Whisper modes transcribe speaker names in caps)
+    // e.g. "JOÃO SILVA:" or "FABIAN FIGUEIREDO:"
+    /(?:^|\n)([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ]{2,}(?:\s+[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ]{2,})+)\s*[:\-—]/gm,
   ];
 
   const candidates = new Set<string>();
   for (const re of patterns) {
     for (const m of text.matchAll(re)) {
       const name = m[1]?.trim();
-      if (name && name.length > 3) candidates.add(name);
+      if (name && name.length > 3 && !/\bpalavra\b/i.test(name)) {
+        candidates.add(name);
+      }
     }
   }
 
   if (!candidates.size) return null;
 
-  for (const candidate of candidates) {
-    // Try each significant word (>3 chars) as a sub-string match
-    const words = candidate.split(/\s+/).filter((w) => w.length > 3);
-    for (const word of words) {
+  // Helper: try to find a politician whose name contains all candidate words
+  async function findPolitician(query: string): Promise<string | null> {
+    const words = query
+      .split(/\s+/)
+      .map((w) => w.replace(/[^\w]/g, ""))
+      .filter((w) => w.length > 3);
+
+    if (!words.length) return null;
+
+    // Try the full candidate string first (most specific)
+    const { data: full } = await supabase
+      .from("politicians")
+      .select("id, name")
+      .ilike("name", `%${words.join("%")}%`)
+      .limit(1)
+      .maybeSingle();
+    if (full) return full.id as string;
+
+    // Fall back: match by each significant word (last name is usually unique)
+    for (const word of words.slice().reverse()) {
       const { data } = await supabase
         .from("politicians")
         .select("id, name")
@@ -273,10 +329,16 @@ async function identifySpeakerFromText(
         .limit(1)
         .maybeSingle();
       if (data) {
-        console.log(`[transcribe] Speaker from text: "${data.name}" (matched "${word}")`);
+        console.log(`[transcribe] Speaker: "${data.name}" (word match: "${word}")`);
         return data.id as string;
       }
     }
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    const id = await findPolitician(candidate);
+    if (id) return id;
   }
 
   return null;
