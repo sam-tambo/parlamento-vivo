@@ -44,7 +44,6 @@ export type Database = {
           total_filler_count: number
           total_speaking_seconds: number
           total_speeches: number
-          total_words: number
         }
         Insert: {
           average_filler_ratio?: number
@@ -57,7 +56,6 @@ export type Database = {
           total_filler_count?: number
           total_speaking_seconds?: number
           total_speeches?: number
-          total_words?: number
         }
         Update: {
           average_filler_ratio?: number
@@ -70,49 +68,6 @@ export type Database = {
           total_filler_count?: number
           total_speaking_seconds?: number
           total_speeches?: number
-          total_words?: number
-        }
-        Relationships: []
-      }
-      plenario_import_jobs: {
-        Row: {
-          id: string
-          legislatura: string
-          status: string
-          total_sessions: number
-          sessions_processed: number
-          speeches_inserted: number
-          current_session: string | null
-          error_message: string | null
-          started_at: string
-          completed_at: string | null
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          legislatura?: string
-          status?: string
-          total_sessions?: number
-          sessions_processed?: number
-          speeches_inserted?: number
-          current_session?: string | null
-          error_message?: string | null
-          started_at?: string
-          completed_at?: string | null
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          legislatura?: string
-          status?: string
-          total_sessions?: number
-          sessions_processed?: number
-          speeches_inserted?: number
-          current_session?: string | null
-          error_message?: string | null
-          started_at?: string
-          completed_at?: string | null
-          created_at?: string
         }
         Relationships: []
       }
@@ -121,14 +76,9 @@ export type Database = {
           artv_stream_url: string | null
           artv_video_url: string | null
           created_at: string
-          dar_url: string | null
           date: string
           end_time: string | null
           id: string
-          last_hls_segment: string | null
-          last_hls_sequence: number | null
-          legislatura: string | null
-          session_number: number | null
           start_time: string | null
           status: string
           total_filler_count: number | null
@@ -139,14 +89,9 @@ export type Database = {
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
-          dar_url?: string | null
           date: string
           end_time?: string | null
           id?: string
-          last_hls_segment?: string | null
-          last_hls_sequence?: number | null
-          legislatura?: string | null
-          session_number?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -157,14 +102,9 @@ export type Database = {
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
-          dar_url?: string | null
           date?: string
           end_time?: string | null
           id?: string
-          last_hls_segment?: string | null
-          last_hls_sequence?: number | null
-          legislatura?: string | null
-          session_number?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -232,7 +172,7 @@ export type Database = {
           created_at: string
           duration_seconds: number | null
           filler_count: number
-          filler_words_found: Json
+          filler_words_found: Json | null
           id: string
           politician_id: string | null
           session_id: string | null
@@ -244,7 +184,7 @@ export type Database = {
           created_at?: string
           duration_seconds?: number | null
           filler_count?: number
-          filler_words_found?: Json
+          filler_words_found?: Json | null
           id?: string
           politician_id?: string | null
           session_id?: string | null
@@ -256,7 +196,7 @@ export type Database = {
           created_at?: string
           duration_seconds?: number | null
           filler_count?: number
-          filler_words_found?: Json
+          filler_words_found?: Json | null
           id?: string
           politician_id?: string | null
           session_id?: string | null
@@ -286,14 +226,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      refresh_all_politician_stats: {
-        Args: Record<PropertyKey, never>
-        Returns: Json
-      }
-      refresh_politician_stats: {
-        Args: { p_id: string }
-        Returns: undefined
-      }
+      [_ in never]: never
     }
     Enums: {
       [_ in never]: never

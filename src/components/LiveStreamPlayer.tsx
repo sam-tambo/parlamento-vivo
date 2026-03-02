@@ -132,7 +132,7 @@ export default function LiveStreamPlayer({
             "Authorization": `Bearer ${anonKey}`,
             ...(sessionId ? { "x-session-id": sessionId } : {}),
           },
-          body: wav,
+          body: wav as unknown as BodyInit,
         });
 
         if (resp.ok) {

@@ -110,7 +110,7 @@ async function transcribeWithHF(
             // Ask HF to wait for the model to load instead of returning 503
             "X-Wait-For-Model": "true",
           },
-          body: audioBytes,
+          body: audioBytes as unknown as BodyInit,
           signal: AbortSignal.timeout(60_000),
         });
 
@@ -273,8 +273,8 @@ async function identifySpeakerFromText(
         .limit(1)
         .maybeSingle();
       if (data) {
-        console.log(`[transcribe] Speaker from text: "${data.name}" (matched "${word}")`);
-        return data.id as string;
+        console.log(`[transcribe] Speaker from text: "${(data as any).name}" (matched "${word}")`);
+        return (data as any).id as string;
       }
     }
   }
@@ -381,7 +381,7 @@ Deno.serve(async (req: Request) => {
     // ── Resolve politician: header hint → text extraction → null ────────────
     let resolvedPoliticianId: string | null = politicianId;
     if (!resolvedPoliticianId && text) {
-      resolvedPoliticianId = await identifySpeakerFromText(text, supabase);
+      resolvedPoliticianId = await identifySpeakerFromText(text, supabase as any);
     }
     if (resolvedPoliticianId) {
       console.log(`[transcribe] Attributed to politician ${resolvedPoliticianId}`);
