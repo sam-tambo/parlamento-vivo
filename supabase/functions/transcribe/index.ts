@@ -102,56 +102,52 @@ async function transcribeWithHF(
   for (const model of WHISPER_MODELS) {
     for (const url of hfUrls(model)) {
       try {
+        // HF now requires multipart/form-data with a file field
+        const formData = new FormData();
+        const blob = new Blob([audioBytes], { type: "audio/mpeg" });
+        formData.append("file", blob, "audio.mp3");
+
         const resp = await fetch(url, {
           method: "POST",
           headers: {
-            Authorization:  `Bearer ${hfToken}`,
-            "Content-Type": "application/octet-stream",
-            // Ask HF to wait for the model to load instead of returning 503
+            Authorization: `Bearer ${hfToken}`,
             "X-Wait-For-Model": "true",
           },
-          body: audioBytes as unknown as BodyInit,
+          body: formData,
           signal: AbortSignal.timeout(60_000),
         });
 
         if (resp.status === 503) {
-          // Model is spinning up — the X-Wait-For-Model header usually prevents
-          // this, but note it and fall through to try the next URL/model.
           errors.push(`${model} @ ${url.slice(8, 50)}: 503 model loading`);
           continue;
         }
 
         if (resp.status === 410 || resp.status === 404) {
-          // Endpoint removed/gone — skip this URL, try next one.
           errors.push(`${model} @ ${url.slice(8, 50)}: ${resp.status} endpoint gone`);
           continue;
         }
 
         if (!resp.ok) {
-          // Non-retryable error — read body for detail (might be HTML or JSON)
           const body = await resp.text();
           const detail = body.startsWith("<")
             ? `HTTP ${resp.status} (HTML response — check HF token permissions)`
             : `HTTP ${resp.status}: ${body.slice(0, 200)}`;
           errors.push(`${model}: ${detail}`);
-          // Non-410/503 errors may be auth/quota issues — don't retry other models
           throw new Error(errors.join(" | "));
         }
 
-        // Parse response — shape: { text: "..." } or [{ text: "..." }]
         const json = await resp.json();
         if (typeof json?.text === "string") return json.text.trim();
         if (Array.isArray(json) && json[0]?.text) return json[0].text.trim();
         throw new Error(`Unexpected HF response: ${JSON.stringify(json).slice(0, 200)}`);
 
       } catch (e) {
-        if (e instanceof Error && e.message.includes(" | ")) throw e; // already formatted
+        if (e instanceof Error && e.message.includes(" | ")) throw e;
         errors.push(`${model} @ ${url.slice(8, 50)}: ${(e as Error)?.message ?? e}`);
       }
     }
   }
 
-  // All models and URLs exhausted
   throw new Error(`All HF endpoints failed: ${errors.join(" | ")}`);
 }
 
