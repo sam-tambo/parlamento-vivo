@@ -32,11 +32,57 @@ export type Database = {
         }
         Relationships: []
       }
+      plenario_import_jobs: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          current_session: string | null
+          error_message: string | null
+          id: string
+          legislatura: string
+          sessions_processed: number
+          speeches_inserted: number
+          started_at: string | null
+          status: string
+          total_sessions: number
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          current_session?: string | null
+          error_message?: string | null
+          id?: string
+          legislatura: string
+          sessions_processed?: number
+          speeches_inserted?: number
+          started_at?: string | null
+          status?: string
+          total_sessions?: number
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          current_session?: string | null
+          error_message?: string | null
+          id?: string
+          legislatura?: string
+          sessions_processed?: number
+          speeches_inserted?: number
+          started_at?: string | null
+          status?: string
+          total_sessions?: number
+        }
+        Relationships: []
+      }
       politicians: {
         Row: {
           average_filler_ratio: number
+          bid: number | null
+          constituency: string | null
           created_at: string
+          full_name: string | null
           id: string
+          legislature: string | null
           name: string
           parlamento_url: string | null
           party: string
@@ -44,11 +90,16 @@ export type Database = {
           total_filler_count: number
           total_speaking_seconds: number
           total_speeches: number
+          total_words: number
         }
         Insert: {
           average_filler_ratio?: number
+          bid?: number | null
+          constituency?: string | null
           created_at?: string
+          full_name?: string | null
           id?: string
+          legislature?: string | null
           name: string
           parlamento_url?: string | null
           party: string
@@ -56,11 +107,16 @@ export type Database = {
           total_filler_count?: number
           total_speaking_seconds?: number
           total_speeches?: number
+          total_words?: number
         }
         Update: {
           average_filler_ratio?: number
+          bid?: number | null
+          constituency?: string | null
           created_at?: string
+          full_name?: string | null
           id?: string
+          legislature?: string | null
           name?: string
           parlamento_url?: string | null
           party?: string
@@ -68,6 +124,7 @@ export type Database = {
           total_filler_count?: number
           total_speaking_seconds?: number
           total_speeches?: number
+          total_words?: number
         }
         Relationships: []
       }
@@ -76,9 +133,14 @@ export type Database = {
           artv_stream_url: string | null
           artv_video_url: string | null
           created_at: string
+          dar_url: string | null
           date: string
           end_time: string | null
           id: string
+          last_hls_segment: string | null
+          last_hls_sequence: number | null
+          legislatura: string | null
+          session_number: number | null
           start_time: string | null
           status: string
           total_filler_count: number | null
@@ -89,9 +151,14 @@ export type Database = {
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
+          dar_url?: string | null
           date: string
           end_time?: string | null
           id?: string
+          last_hls_segment?: string | null
+          last_hls_sequence?: number | null
+          legislatura?: string | null
+          session_number?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -102,9 +169,14 @@ export type Database = {
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
+          dar_url?: string | null
           date?: string
           end_time?: string | null
           id?: string
+          last_hls_segment?: string | null
+          last_hls_sequence?: number | null
+          legislatura?: string | null
+          session_number?: number | null
           start_time?: string | null
           status?: string
           total_filler_count?: number | null
@@ -120,7 +192,7 @@ export type Database = {
           filler_word_count: number
           filler_words_detail: Json | null
           id: string
-          politician_id: string
+          politician_id: string | null
           session_id: string
           speaking_duration_seconds: number
           total_word_count: number
@@ -132,7 +204,7 @@ export type Database = {
           filler_word_count?: number
           filler_words_detail?: Json | null
           id?: string
-          politician_id: string
+          politician_id?: string | null
           session_id: string
           speaking_duration_seconds?: number
           total_word_count?: number
@@ -144,7 +216,7 @@ export type Database = {
           filler_word_count?: number
           filler_words_detail?: Json | null
           id?: string
-          politician_id?: string
+          politician_id?: string | null
           session_id?: string
           speaking_duration_seconds?: number
           total_word_count?: number
@@ -157,6 +229,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "politicians"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "speeches_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
           },
           {
             foreignKeyName: "speeches_session_id_fkey"
@@ -216,6 +295,13 @@ export type Database = {
             foreignKeyName: "transcript_events_session_id_fkey"
             columns: ["session_id"]
             isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "transcript_events_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
             referencedRelation: "sessions"
             referencedColumns: ["id"]
           },
@@ -223,10 +309,33 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      live_session_status: {
+        Row: {
+          artv_stream_url: string | null
+          date: string | null
+          event_count: number | null
+          last_event_at: string | null
+          last_hls_sequence: number | null
+          session_id: string | null
+          start_time: string | null
+          status: string | null
+          total_fillers: number | null
+          total_words: number | null
+          transcript_status: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
-      [_ in never]: never
+      refresh_all_politician_stats: { Args: never; Returns: Json }
+      refresh_politician_stats: {
+        Args: { p_politician_id: string }
+        Returns: undefined
+      }
+      update_session_hls_url: {
+        Args: { p_hls_url: string; p_session_id: string }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
