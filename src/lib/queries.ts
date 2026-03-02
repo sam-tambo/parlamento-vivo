@@ -282,7 +282,7 @@ export function useRefreshPoliticianStats() {
   return useQuery({
     queryKey: ["refresh_politician_stats"],
     queryFn: async () => {
-      const { data, error } = await supabase.rpc("refresh_all_politician_stats");
+      const { data, error } = await (supabase as any).rpc("refresh_all_politician_stats");
       if (error) {
         // Non-fatal: stats will still be correct for new events via the trigger
         console.warn("[stats] refresh_all_politician_stats:", error.message);
@@ -316,7 +316,7 @@ export function usePlenarioSessions(legislatura = "XVII") {
       // the page still renders without crashing.
       let sessions: any[] | null = null;
 
-      const { data: withLeg, error: legErr } = await supabase
+      const { data: withLeg, error: legErr } = await (supabase as any)
         .from("sessions")
         .select("id, date, legislatura, dar_url, session_number, status")
         .eq("legislatura", legislatura)
@@ -382,7 +382,7 @@ export function usePlenarioImportJob(jobId: string | null) {
     queryKey: ["plenario_import_job", jobId],
     queryFn: async (): Promise<PlenarioImportJob | null> => {
       if (!jobId) return null;
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("plenario_import_jobs")
         .select("*")
         .eq("id", jobId)
