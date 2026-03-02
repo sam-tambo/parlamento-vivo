@@ -81,7 +81,15 @@ export default function AoVivo() {
   // Reads sessionId from sessionIdRef (never stale, updated by effect above).
   // Retries automatically on HTTP 503 (HuggingFace model loading).
   const sendChunk = useCallback(async (blob: Blob) => {
-    if (!blob.size) return;
+    if (!blob.size) {
+      // Audio track exists but produced zero data — most likely the video mute
+      // state prevented the capture pipeline from initialising. Stop the chain
+      // so the user can click "Tentar novamente" to restart with a fresh stream.
+      setCronState("error");
+      setCronMsg("Sem dados de áudio — ative o som no vídeo e clique «Tentar novamente»");
+      captureActiveRef.current = false;
+      return;
+    }
 
     const sessionId = sessionIdRef.current; // always fresh
 
@@ -178,11 +186,35 @@ export default function AoVivo() {
   const recordChunk = useCallback((stream: MediaStream) => {
     if (!captureActiveRef.current) return;
 
+    // Safety check: if the stream's tracks ended (e.g., CDN reconnect), restart.
+    const liveTracks = stream.getAudioTracks().filter(t => t.readyState === "live");
+    if (!liveTracks.length) {
+      setCronState("error");
+      setCronMsg("Pista de áudio encerrada — clique «Tentar novamente» para reconectar");
+      captureActiveRef.current = false;
+      return;
+    }
+
     const mimeType = bestAudioMime();
-    const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    let rec: MediaRecorder;
+    try {
+      rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    } catch (e) {
+      setCronState("error");
+      setCronMsg(`MediaRecorder não iniciado: ${(e as Error)?.message ?? e}`);
+      captureActiveRef.current = false;
+      return;
+    }
+
     const chunks: Blob[] = [];
 
     rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    rec.onerror = (e) => {
+      console.error("[capture] MediaRecorder error:", e);
+      setCronState("error");
+      setCronMsg("Erro no MediaRecorder — clique «Tentar novamente»");
+      captureActiveRef.current = false;
+    };
     rec.onstop = () => {
       const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
       sendChunk(blob).then(() => {
@@ -190,7 +222,15 @@ export default function AoVivo() {
       });
     };
 
-    rec.start();
+    try {
+      rec.start();
+    } catch (e) {
+      setCronState("error");
+      setCronMsg(`Não foi possível iniciar a gravação: ${(e as Error)?.message ?? e}`);
+      captureActiveRef.current = false;
+      return;
+    }
+
     recorderRef.current = rec;
     setTimeout(() => { if (rec.state === "recording") rec.stop(); }, 30_000);
   }, [sendChunk]);
@@ -207,6 +247,10 @@ export default function AoVivo() {
   const startCapture = useCallback(async (video: HTMLVideoElement) => {
     if (captureActiveRef.current) return; // already running
 
+    // Set flag IMMEDIATELY — prevents a second concurrent call during the
+    // async unmute-wait below (the "playing" event can fire multiple times).
+    captureActiveRef.current = true;
+
     setCronState("starting");
     setCronMsg("A iniciar captura de áudio…");
 
@@ -215,8 +259,8 @@ export default function AoVivo() {
       //    Setting muted=false via JS is always allowed (no user-gesture needed).
       video.muted = false;
 
-      // 2. Give the audio pipeline 400 ms to initialise after unmuting.
-      await new Promise<void>(r => setTimeout(r, 400));
+      // 2. Give the audio pipeline 600 ms to initialise after unmuting.
+      await new Promise<void>(r => setTimeout(r, 600));
 
       let audioStream: MediaStream | null = null;
 
@@ -224,9 +268,13 @@ export default function AoVivo() {
       if (typeof (video as any).captureStream === "function") {
         const captured = (video as any).captureStream() as MediaStream;
         const tracks   = captured.getAudioTracks();
-        if (tracks.length) {
-          audioStream = new MediaStream(tracks);
-          console.log("[capture] captureStream() OK —", tracks.length, "audio track(s)");
+        // Only use tracks that are actually live — "ended" tracks produce no data.
+        const liveTracks = tracks.filter(t => t.readyState === "live");
+        if (liveTracks.length) {
+          audioStream = new MediaStream(liveTracks);
+          console.log("[capture] captureStream() OK —", liveTracks.length, "live audio track(s)");
+        } else if (tracks.length) {
+          console.warn("[capture] captureStream() tracks not live:", tracks.map(t => `${t.label}:${t.readyState}`));
         } else {
           console.warn("[capture] captureStream() returned no audio tracks — trying Web Audio API");
         }
@@ -242,16 +290,21 @@ export default function AoVivo() {
         if (AudioCtx) {
           const ctx    = new AudioCtx();
           audioCtxRef.current = ctx;
+          // Resume the context — Chrome suspends AudioContext until a user gesture.
+          if (ctx.state === "suspended") {
+            await ctx.resume().catch(() => {});
+          }
           const source = ctx.createMediaElementSource(video);
           source.connect(ctx.destination);               // keep speakers working
           const dest   = ctx.createMediaStreamDestination();
           source.connect(dest);                          // also route to recorder
           audioStream  = dest.stream;
-          console.log("[capture] Web Audio API OK —", audioStream.getAudioTracks().length, "track(s)");
+          console.log("[capture] Web Audio API OK — state:", ctx.state, "—", audioStream.getAudioTracks().length, "track(s)");
         }
       }
 
       if (!audioStream || !audioStream.getAudioTracks().length) {
+        captureActiveRef.current = false; // reset so retry button works
         setCronState("error");
         setCronMsg(
           "Sem pista de áudio — use Chrome/Firefox e certifique-se que o vídeo está a reproduzir"
@@ -259,14 +312,15 @@ export default function AoVivo() {
         return;
       }
 
-      audioStreamRef.current   = audioStream;
-      captureActiveRef.current = true;
+      audioStreamRef.current = audioStream;
+      // captureActiveRef.current is already true (set at the start)
 
       setCronState("running");
       setCronMsg("Captura ativa — primeiro resultado em ~30 s");
       recordChunk(audioStream);
 
     } catch (e) {
+      captureActiveRef.current = false; // reset so retry button works
       const msg = (e as Error)?.message ?? String(e);
       console.error("[capture] startCapture error:", e);
       setCronState("error");
@@ -297,9 +351,14 @@ export default function AoVivo() {
       setCronMsg("Vídeo ainda não está pronto — aguarde o início do stream");
       return;
     }
-    // Stop any existing capture before restarting
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    // Signal stop FIRST so the old recorder's onstop callback sees
+    // captureActiveRef = false and doesn't interfere with the new capture.
     captureActiveRef.current = false;
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
+      // Allow onstop to fire and complete before we restart.
+      await new Promise<void>(r => setTimeout(r, 150));
+    }
     audioCtxRef.current?.close();
     audioCtxRef.current = null;
     await startCapture(video);
