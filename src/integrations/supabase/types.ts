@@ -32,11 +32,57 @@ export type Database = {
         }
         Relationships: []
       }
+      plenario_import_jobs: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          current_session: string | null
+          error_message: string | null
+          id: string
+          legislatura: string
+          sessions_processed: number
+          speeches_inserted: number
+          started_at: string | null
+          status: string
+          total_sessions: number
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          current_session?: string | null
+          error_message?: string | null
+          id?: string
+          legislatura: string
+          sessions_processed?: number
+          speeches_inserted?: number
+          started_at?: string | null
+          status?: string
+          total_sessions?: number
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          current_session?: string | null
+          error_message?: string | null
+          id?: string
+          legislatura?: string
+          sessions_processed?: number
+          speeches_inserted?: number
+          started_at?: string | null
+          status?: string
+          total_sessions?: number
+        }
+        Relationships: []
+      }
       politicians: {
         Row: {
           average_filler_ratio: number
+          bid: number | null
+          constituency: string | null
           created_at: string
+          full_name: string | null
           id: string
+          legislature: string | null
           name: string
           parlamento_url: string | null
           party: string
@@ -48,8 +94,12 @@ export type Database = {
         }
         Insert: {
           average_filler_ratio?: number
+          bid?: number | null
+          constituency?: string | null
           created_at?: string
+          full_name?: string | null
           id?: string
+          legislature?: string | null
           name: string
           parlamento_url?: string | null
           party: string
@@ -61,8 +111,12 @@ export type Database = {
         }
         Update: {
           average_filler_ratio?: number
+          bid?: number | null
+          constituency?: string | null
           created_at?: string
+          full_name?: string | null
           id?: string
+          legislature?: string | null
           name?: string
           parlamento_url?: string | null
           party?: string
@@ -71,48 +125,6 @@ export type Database = {
           total_speaking_seconds?: number
           total_speeches?: number
           total_words?: number
-        }
-        Relationships: []
-      }
-      plenario_import_jobs: {
-        Row: {
-          id: string
-          legislatura: string
-          status: string
-          total_sessions: number
-          sessions_processed: number
-          speeches_inserted: number
-          current_session: string | null
-          error_message: string | null
-          started_at: string
-          completed_at: string | null
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          legislatura?: string
-          status?: string
-          total_sessions?: number
-          sessions_processed?: number
-          speeches_inserted?: number
-          current_session?: string | null
-          error_message?: string | null
-          started_at?: string
-          completed_at?: string | null
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          legislatura?: string
-          status?: string
-          total_sessions?: number
-          sessions_processed?: number
-          speeches_inserted?: number
-          current_session?: string | null
-          error_message?: string | null
-          started_at?: string
-          completed_at?: string | null
-          created_at?: string
         }
         Relationships: []
       }
@@ -180,7 +192,7 @@ export type Database = {
           filler_word_count: number
           filler_words_detail: Json | null
           id: string
-          politician_id: string
+          politician_id: string | null
           session_id: string
           speaking_duration_seconds: number
           total_word_count: number
@@ -192,7 +204,7 @@ export type Database = {
           filler_word_count?: number
           filler_words_detail?: Json | null
           id?: string
-          politician_id: string
+          politician_id?: string | null
           session_id: string
           speaking_duration_seconds?: number
           total_word_count?: number
@@ -204,7 +216,7 @@ export type Database = {
           filler_word_count?: number
           filler_words_detail?: Json | null
           id?: string
-          politician_id?: string
+          politician_id?: string | null
           session_id?: string
           speaking_duration_seconds?: number
           total_word_count?: number
@@ -222,6 +234,13 @@ export type Database = {
             foreignKeyName: "speeches_session_id_fkey"
             columns: ["session_id"]
             isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "speeches_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
             referencedRelation: "sessions"
             referencedColumns: ["id"]
           },
@@ -232,7 +251,7 @@ export type Database = {
           created_at: string
           duration_seconds: number | null
           filler_count: number
-          filler_words_found: Json
+          filler_words_found: Json | null
           id: string
           politician_id: string | null
           session_id: string | null
@@ -244,7 +263,7 @@ export type Database = {
           created_at?: string
           duration_seconds?: number | null
           filler_count?: number
-          filler_words_found?: Json
+          filler_words_found?: Json | null
           id?: string
           politician_id?: string | null
           session_id?: string | null
@@ -256,7 +275,7 @@ export type Database = {
           created_at?: string
           duration_seconds?: number | null
           filler_count?: number
-          filler_words_found?: Json
+          filler_words_found?: Json | null
           id?: string
           politician_id?: string | null
           session_id?: string | null
@@ -276,6 +295,13 @@ export type Database = {
             foreignKeyName: "transcript_events_session_id_fkey"
             columns: ["session_id"]
             isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "transcript_events_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
             referencedRelation: "sessions"
             referencedColumns: ["id"]
           },
@@ -283,15 +309,31 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      live_session_status: {
+        Row: {
+          artv_stream_url: string | null
+          date: string | null
+          event_count: number | null
+          last_event_at: string | null
+          last_hls_sequence: number | null
+          session_id: string | null
+          start_time: string | null
+          status: string | null
+          total_fillers: number | null
+          total_words: number | null
+          transcript_status: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
-      refresh_all_politician_stats: {
-        Args: Record<PropertyKey, never>
-        Returns: Json
-      }
+      refresh_all_politician_stats: { Args: never; Returns: Json }
       refresh_politician_stats: {
-        Args: { p_id: string }
+        Args: { p_politician_id: string }
+        Returns: undefined
+      }
+      update_session_hls_url: {
+        Args: { p_hls_url: string; p_session_id: string }
         Returns: undefined
       }
     }

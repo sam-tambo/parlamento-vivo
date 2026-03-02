@@ -1,20 +1,39 @@
 
 
-## Plan: Add politician photo thumbnails
+## Diagnosis
 
-The `politicians` table already has a `photo_url` column, and `AvatarImage` is available from the avatar component. Currently, all avatars show only initials via `AvatarFallback`. The database is empty, but photos will come from the parlamento.pt scraper.
+The `transcribe` edge function is returning **502 errors** because the HuggingFace Whisper Inference API rejects `multipart/form-data`. The error from HF is explicit:
 
-### Changes
+> Content type "multipart/form-data; boundary=..." not supported.
 
-1. **`src/pages/Politicians.tsx`** — Import `AvatarImage` and add it inside every `Avatar` (podium top-3 + deputy grid). `AvatarFallback` remains as fallback when no photo exists.
+The previous "fix" incorrectly changed from raw binary (`application/octet-stream`) to `FormData`. According to the current HF Inference Providers documentation, the ASR endpoint accepts **raw audio bytes** when no parameters are provided.
 
-2. **`src/components/SpeechCard.tsx`** — Same: add `AvatarImage` using `politician.photo_url`.
+## Root Cause
 
-3. **`src/pages/AoVivo.tsx`** — Add `AvatarImage` in the "current speaker" card, `TranscriptBlock`, and `SessionSpeakersCard` avatars.
+In `supabase/functions/transcribe/index.ts`, the `transcribeWithHF` function wraps audio in `FormData` (lines 106-108), but HF's router expects raw bytes with `Content-Type: audio/mpeg` or `application/octet-stream`.
 
-All three files already import `Avatar` and `AvatarFallback`. The only addition is importing `AvatarImage` and inserting `<AvatarImage src={photo_url} />` before each `<AvatarFallback>`. The fallback initials display automatically when the image fails or is null.
+## Fix
 
-### Build error fix
+Revert the `transcribeWithHF` function to send raw bytes:
 
-The `@supabase/realtime-js` import error in edge functions will also be addressed by removing the problematic npm import from the edge function code (Deno doesn't resolve npm packages the same way).
+```typescript
+const resp = await fetch(url, {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${hfToken}`,
+    "Content-Type": "audio/mpeg",
+    "X-Wait-For-Model": "true",
+  },
+  body: audioBytes,
+  signal: AbortSignal.timeout(60_000),
+});
+```
+
+Changes:
+- Remove `FormData` and `Blob` construction (lines 106-108)
+- Set explicit `Content-Type: audio/mpeg` header
+- Pass `audioBytes` directly as the request body
+- Redeploy the `transcribe` edge function
+
+This is a single-file change in `supabase/functions/transcribe/index.ts`, approximately 5 lines modified.
 

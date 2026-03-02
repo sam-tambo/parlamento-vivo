@@ -8,3 +8,9 @@ verify_jwt = false
 
 [functions.hls-proxy]
 verify_jwt = false
+
+[functions.scrape-plenario]
+verify_jwt = false
+
+[functions.scrape-politicians]
+verify_jwt = false

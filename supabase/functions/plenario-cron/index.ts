@@ -373,8 +373,8 @@ async function fetchCurrentSpeaker(
           .limit(1)
           .maybeSingle();
         if (pol) {
-          console.log(`[cron] Matched politician: ${pol.name}`);
-          return pol.id as string;
+          console.log(`[cron] Matched politician: ${(pol as any).name}`);
+          return (pol as any).id as string;
         }
       }
     } catch { /* try next endpoint */ }
@@ -499,7 +499,7 @@ Deno.serve(async (req: Request) => {
       return Response.json({ error: "Could not create session", detail: error?.message }, { status: 500, headers: CORS });
     }
     session = created;
-    console.log(`[cron] Created session ${session.id} for ${today}`);
+    console.log(`[cron] Created session ${session!.id} for ${today}`);
   }
 
   // ── Accept HLS hint from request body (live_trigger.py passes this) ──────
@@ -512,18 +512,18 @@ Deno.serve(async (req: Request) => {
   } catch { /* */ }
 
   // ── Resolve HLS URL (5-stage discovery) ──────────────────────────────────
-  const hlsUrl = await findArtvHlsUrl(bodyHint ?? session.artv_stream_url ?? null);
+  const hlsUrl = await findArtvHlsUrl(bodyHint ?? session!.artv_stream_url ?? null);
 
   if (!hlsUrl) {
     console.warn("[cron] Stream not found — parliament may not be broadcasting");
     // Mark session as waiting (not error — will retry next minute)
-    await supabase.from("sessions").update({ transcript_status: "pending" }).eq("id", session.id);
-    return Response.json({ session_id: session.id, waiting: true, message: "Stream not available" }, { headers: CORS });
+    await supabase.from("sessions").update({ transcript_status: "pending" }).eq("id", session!.id);
+    return Response.json({ session_id: session!.id, waiting: true, message: "Stream not available" }, { headers: CORS });
   }
 
   // Cache the discovered URL
-  if (hlsUrl !== session.artv_stream_url) {
-    await supabase.from("sessions").update({ artv_stream_url: hlsUrl, transcript_status: "processing" }).eq("id", session.id);
+  if (hlsUrl !== session!.artv_stream_url) {
+    await supabase.from("sessions").update({ artv_stream_url: hlsUrl, transcript_status: "processing" }).eq("id", session!.id);
   }
 
   // ── Parse playlist → find new segments ───────────────────────────────────
@@ -531,23 +531,23 @@ Deno.serve(async (req: Request) => {
   const playlist = await fetchPlaylist(mediaUrl);
 
   if (!playlist || !playlist.segments.length) {
-    return Response.json({ session_id: session.id, error: "Empty playlist" }, { headers: CORS });
+    return Response.json({ session_id: session!.id, error: "Empty playlist" }, { headers: CORS });
   }
 
-  const lastSeq     = session.last_hls_sequence ?? -1;
+  const lastSeq     = (session as any).last_hls_sequence ?? -1;
   const windowStart = playlist.sequence;
   const newStart    = lastSeq >= windowStart ? Math.min(lastSeq - windowStart + 1, playlist.segments.length) : 0;
   const newSegments = playlist.segments.slice(newStart);
 
   if (!newSegments.length) {
     console.log(`[cron] No new segments (cursor=${lastSeq})`);
-    return Response.json({ session_id: session.id, new_segments: 0 }, { headers: CORS });
+    return Response.json({ session_id: session!.id, new_segments: 0 }, { headers: CORS });
   }
 
   console.log(`[cron] ${newSegments.length} new segments to transcribe`);
 
   // ── Identify current speaker (best-effort, doesn't block if null) ─────────
-  const currentSpeakerId = await fetchCurrentSpeaker(supabase);
+  const currentSpeakerId = await fetchCurrentSpeaker(supabase as any);
   if (currentSpeakerId) {
     console.log(`[cron] Current speaker hint: ${currentSpeakerId}`);
   }
@@ -561,7 +561,7 @@ Deno.serve(async (req: Request) => {
       const transcribeHeaders: Record<string, string> = {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${SERVICE_KEY}`,
-        "x-session-id": session.id,
+        "x-session-id": session!.id,
       };
       if (currentSpeakerId) transcribeHeaders["x-politician-id"] = currentSpeakerId;
 
@@ -591,12 +591,12 @@ Deno.serve(async (req: Request) => {
   await supabase.from("sessions").update({
     last_hls_sequence:      newCursor,
     last_hls_segment:       newSegments[newSegments.length - 1],
-    total_filler_count:     (session.total_filler_count    ?? 0) + totalFillers,
-    total_speaking_minutes: parseFloat(((session.total_speaking_minutes ?? 0) + minsAdded).toFixed(2)),
-  }).eq("id", session.id);
+    total_filler_count:     (session!.total_filler_count    ?? 0) + totalFillers,
+    total_speaking_minutes: parseFloat(((session!.total_speaking_minutes ?? 0) + minsAdded).toFixed(2)),
+  }).eq("id", session!.id);
 
   return Response.json({
-    session_id: session.id,
+    session_id: session!.id,
     hls_url: hlsUrl,
     new_segments: newSegments.length,
     chunks_sent: chunksOk,
