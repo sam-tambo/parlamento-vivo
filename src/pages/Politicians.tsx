@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Trophy, Clock, MessageSquare, Users, MicOff } from "lucide-react";
+import { Trophy, Clock, MessageSquare, Users, MicOff, FileText } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,11 +8,11 @@ import { Progress } from "@/components/ui/progress";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
-import { usePoliticians, useRefreshPoliticianStats } from "@/lib/queries";
+import { usePoliticians, useDeputyActivity, useRefreshPoliticianStats } from "@/lib/queries";
 import { gradeFillerRate } from "@/lib/filler-words";
 import { PARTIES, PARTY_COLORS } from "@/lib/mock-data";
 
-type SortMode = "filler" | "active" | "silent" | "speeches";
+type SortMode = "filler" | "active" | "silent" | "speeches" | "interventions";
 
 const tooltipStyle = {
   contentStyle: { backgroundColor: "hsl(222 40% 10%)", border: "1px solid hsl(222 25% 18%)", borderRadius: "8px", fontSize: 12 },
@@ -27,14 +27,22 @@ export default function Politicians() {
   useRefreshPoliticianStats();
 
   const { data: politicians = [], isLoading } = usePoliticians();
+  const { data: activity = [] } = useDeputyActivity();
+
+  // Build id → activity lookup
+  const activityMap = useMemo(
+    () => Object.fromEntries(activity.map(a => [a.id, a])),
+    [activity],
+  );
 
   const getSorted = () => {
     const list = [...politicians];
     switch (sortMode) {
-      case "filler":   return list.sort((a, b) => b.average_filler_ratio - a.average_filler_ratio);
-      case "active":   return list.sort((a, b) => b.total_speaking_seconds - a.total_speaking_seconds);
-      case "speeches": return list.sort((a, b) => b.total_speeches - a.total_speeches);
-      case "silent":   return list.sort((a, b) => a.total_speaking_seconds - b.total_speaking_seconds);
+      case "filler":        return list.sort((a, b) => b.average_filler_ratio - a.average_filler_ratio);
+      case "active":        return list.sort((a, b) => b.total_speaking_seconds - a.total_speaking_seconds);
+      case "speeches":      return list.sort((a, b) => b.total_speeches - a.total_speeches);
+      case "silent":        return list.sort((a, b) => a.total_speaking_seconds - b.total_speaking_seconds);
+      case "interventions": return list.sort((a, b) => (activityMap[b.id]?.total_interventions ?? 0) - (activityMap[a.id]?.total_interventions ?? 0));
     }
   };
 
@@ -144,14 +152,14 @@ export default function Politicians() {
 
       {/* Sort toggles */}
       <div className="flex flex-wrap gap-2 mb-4">
-        {(["filler", "active", "speeches", "silent"] as SortMode[]).map(mode => (
+        {(["filler", "active", "speeches", "interventions", "silent"] as SortMode[]).map(mode => (
           <Button
             key={mode}
             variant={sortMode === mode ? "default" : "outline"}
             size="sm"
             onClick={() => setSortMode(mode)}
           >
-            {{ filler: "Mais enchimento", active: "Mais tempo", speeches: "Mais discursos", silent: "Mais silenciosos" }[mode]}
+            {{ filler: "Mais enchimento", active: "Mais tempo", speeches: "Mais discursos", interventions: "Intervenções DAR", silent: "Mais silenciosos" }[mode]}
           </Button>
         ))}
       </div>
@@ -191,6 +199,7 @@ export default function Politicians() {
             const fillerPct = (p.average_filler_ratio * 100).toFixed(1);
             const grade = gradeFillerRate(p.average_filler_ratio);
             const color = PARTY_COLORS[p.party] ?? "hsl(45 80% 55%)";
+            const darActivity = activityMap[p.id];
 
             return (
               <motion.div
@@ -241,7 +250,22 @@ export default function Politicians() {
                   </div>
                 )}
 
-                {p.total_speeches === 0 && (
+                {darActivity && darActivity.total_interventions > 0 && (
+                  <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground border-t border-border/30 pt-2">
+                    <span className="flex items-center gap-1">
+                      <FileText className="h-3 w-3" />
+                      {darActivity.total_interventions} interv. DAR
+                    </span>
+                    {darActivity.mic_cutoffs > 0 && (
+                      <span className="text-amber-500 flex items-center gap-0.5">
+                        <MicOff className="h-3 w-3" />
+                        {darActivity.mic_cutoffs}×
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {p.total_speeches === 0 && !darActivity?.total_interventions && (
                   <div className="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
                     <MicOff className="h-3 w-3" />
                     <span>Sem intervenções</span>
