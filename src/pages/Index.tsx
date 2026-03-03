@@ -1,9 +1,10 @@
 import { motion } from "framer-motion";
-import { Mic, Ear, Brain, BarChart3, ArrowRight, Zap, Radio, GitCompare, BookOpen } from "lucide-react";
+import { Mic, Ear, Brain, BarChart3, ArrowRight, Zap, Radio, GitCompare, BookOpen, Archive, Search } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { SpeechCard } from "@/components/SpeechCard";
-import { usePoliticians, useSpeeches } from "@/lib/queries";
+import { SessionCard } from "@/components/SessionCard";
+import { usePoliticians, useSpeeches, useSessions } from "@/lib/queries";
 import { gradeFillerRate } from "@/lib/filler-words";
 
 const steps = [
@@ -19,11 +20,14 @@ const features = [
   { icon: BookOpen,   href: "/palavras",    label: "Palavras",    desc: "Catálogo de enchimentos e ranking por deputado" },
   { icon: GitCompare, href: "/comparar",    label: "Comparar",    desc: "Radar chart lado-a-lado de dois deputados" },
   { icon: BarChart3,  href: "/estatisticas",label: "Estatísticas",desc: "Tendências, partidos e análise temporal" },
+  { icon: Archive,    href: "/sessoes",     label: "Sessões",     desc: "Arquivo completo de sessões com IA" },
+  { icon: Search,     href: "/pesquisa",    label: "Pesquisa",    desc: "Pesquisa por tema, partido ou deputado" },
 ];
 
 export default function Index() {
   const { data: politicians = [] } = usePoliticians();
   const { data: speeches = [] } = useSpeeches();
+  const { data: sessions = [] } = useSessions("XVII", 1);
 
   const active = politicians.filter(p => p.total_speeches > 0);
   const totalFillers = politicians.reduce((s, p) => s + p.total_filler_count, 0);
@@ -126,6 +130,32 @@ export default function Index() {
           </div>
         </div>
       </section>
+
+      {/* ─── Latest session ────────────────────────────────────── */}
+      {sessions.length > 0 && sessions[0].summary_pt && (
+        <section className="py-8 border-t border-border/40">
+          <div className="container max-w-3xl">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold">Última Sessão Plenária</h2>
+              <Link to="/sessoes">
+                <Button variant="ghost" size="sm" className="gap-1.5 text-primary">
+                  Ver todas <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              </Link>
+            </div>
+            <SessionCard session={{
+              id:              sessions[0].id,
+              date:            sessions[0].date,
+              session_number:  sessions[0].session_number,
+              legislatura:     sessions[0].legislatura,
+              dar_url:         sessions[0].dar_url,
+              summary_pt:      sessions[0].summary_pt,
+              analysis_status: sessions[0].analysis_status,
+              deputies_present: sessions[0].deputies_present,
+            }} />
+          </div>
+        </section>
+      )}
 
       {/* ─── Latest speeches ───────────────────────────────────── */}
       {latestSpeeches.length > 0 && (
