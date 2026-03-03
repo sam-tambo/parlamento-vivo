@@ -12,6 +12,7 @@ import Stats from "./pages/Stats";
 import FillerWords from "./pages/FillerWords";
 import Comparar from "./pages/Comparar";
 import Plenario from "./pages/Plenario";
+import HFDashboard from "./pages/HFDashboard";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -39,6 +40,7 @@ const App = () => (
           <Route path="/comparar"     element={<Comparar />} />
           <Route path="/estatisticas" element={<Stats />} />
           <Route path="/plenario"     element={<Plenario />} />
+          <Route path="/hf-dashboard" element={<HFDashboard />} />
           {/* Legacy redirects */}
           <Route path="/speeches"     element={<Speeches />} />
           <Route path="/politicians"  element={<Politicians />} />

@@ -67,7 +67,7 @@ interface SpeechRecord {
   duration_minutes?: number;
 }
 
-type SupabaseClient = ReturnType<typeof createClient>;
+type SupabaseClient = ReturnType<typeof createClient<any>>;
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -737,7 +737,7 @@ const CORS = {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-  const supabase = createClient(
+  const supabase = createClient<any>(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );

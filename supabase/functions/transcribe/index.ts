@@ -243,7 +243,7 @@ async function fetchHLSChunk(
 
 // ─── Speaker identification ───────────────────────────────────────────────────
 
-type SupabaseClient = ReturnType<typeof createClient>;
+type SupabaseClient = ReturnType<typeof createClient<any>>;
 
 /**
  * Try to identify the current speaker from the transcribed text.
@@ -354,7 +354,7 @@ Deno.serve(async (req: Request) => {
     return Response.json({ error: "HF_TOKEN not configured" }, { status: 500, headers: CORS_HEADERS });
   }
 
-  const supabase = createClient(
+  const supabase = createClient<any>(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
@@ -416,8 +416,25 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+    const elapsedSec = (Date.now() - startMs) / 1000;
+    const elapsed = elapsedSec.toFixed(1);
     console.log(`[transcribe] HF took ${elapsed}s → "${text.slice(0, 80)}…"`);
+
+    // ── Log HF usage for cost monitoring ────────────────────────────────────
+    try {
+      const audioDurationEstimate = audioBytes.byteLength / (128000 / 8); // ~128kbps
+      const costEstimate = (audioDurationEstimate / 3600) * 0.06; // ~$0.06/hr
+      await supabase.from("hf_usage_log").insert({
+        function_name: "transcribe",
+        model_used: "openai/whisper-large-v3",
+        audio_bytes: audioBytes.byteLength,
+        duration_seconds: elapsedSec,
+        tokens_estimated: Math.round(audioDurationEstimate * 25),
+        cost_estimated: parseFloat(costEstimate.toFixed(6)),
+      });
+    } catch (e) {
+      console.warn("[transcribe] Failed to log HF usage:", e);
+    }
 
     if (!text) {
       return Response.json({ text: "", filler_count: 0, filler_words: {}, total_words: 0 }, { headers: CORS_HEADERS });
