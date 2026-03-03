@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Mic, BarChart3, Users, MessageSquare, Radio, GitCompare, BookOpen, Menu, X, Archive } from "lucide-react";
+import { Mic, BarChart3, Users, MessageSquare, Radio, GitCompare, BookOpen, Menu, X, Archive, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 
 const navItems = [
   { path: "/ao-vivo",      label: "Ao Vivo",      icon: Radio,       live: true  },
   { path: "/plenario",     label: "Plenário",     icon: Archive                  },
+  { path: "/sessoes",      label: "Sessões",      icon: Archive                  },
+  { path: "/pesquisa",     label: "Pesquisa",     icon: Search                   },
   { path: "/discursos",    label: "Discursos",    icon: MessageSquare             },
   { path: "/palavras",     label: "Palavras",     icon: BookOpen                  },
   { path: "/participacao", label: "Participação", icon: Users                     },

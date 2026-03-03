@@ -30,3 +30,9 @@ lxml>=4.9.0
 
 # Text similarity (dar_profiles.py)
 # difflib is stdlib — no extra install needed
+
+# AI analysis (dar_analyzer.py)
+anthropic>=0.20.0
+
+# PDF fallback (optional — XML preferred)
+pdfplumber>=0.9.0

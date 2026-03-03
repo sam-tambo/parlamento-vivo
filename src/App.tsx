@@ -12,6 +12,9 @@ import Stats from "./pages/Stats";
 import FillerWords from "./pages/FillerWords";
 import Comparar from "./pages/Comparar";
 import Plenario from "./pages/Plenario";
+import Sessions from "./pages/Sessions";
+import SessionDetail from "./pages/SessionDetail";
+import Search from "./pages/Search";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -39,6 +42,9 @@ const App = () => (
           <Route path="/comparar"     element={<Comparar />} />
           <Route path="/estatisticas" element={<Stats />} />
           <Route path="/plenario"     element={<Plenario />} />
+          <Route path="/sessoes"      element={<Sessions />} />
+          <Route path="/sessao/:id"   element={<SessionDetail />} />
+          <Route path="/pesquisa"     element={<Search />} />
           {/* Legacy redirects */}
           <Route path="/speeches"     element={<Speeches />} />
           <Route path="/politicians"  element={<Politicians />} />

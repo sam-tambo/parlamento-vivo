@@ -396,6 +396,239 @@ export function usePlenarioImportJob(jobId: string | null) {
   });
 }
 
+// ─── Parlamento Aberto — Sessions ────────────────────────────────────────────
+
+export interface SessionFull {
+  id: string;
+  date: string;
+  status: string;
+  legislatura: string | null;
+  session_number: number | null;
+  dar_url: string | null;
+  summary_pt: string | null;
+  summary_en: string | null;
+  key_decisions: Array<{ description: string; result: string; significance?: string }> | null;
+  notable_moments: Array<{ type: string; description: string; deputies_involved?: string[] }> | null;
+  analysis_status: string | null;
+  deputies_present: number | null;
+  president_name: string | null;
+  full_text: string | null;
+}
+
+export function useSessions(leg: string = "XVII", limit: number = 50) {
+  return useQuery({
+    queryKey: ["sessions_aberto", leg, limit],
+    queryFn: async (): Promise<SessionFull[]> => {
+      const { data, error } = await supabase
+        .from("sessions")
+        .select("id,date,status,legislatura,session_number,dar_url,summary_pt,analysis_status,deputies_present,president_name")
+        .eq("legislatura", leg)
+        .order("date", { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []) as unknown as SessionFull[];
+    },
+    staleTime: 60_000,
+  });
+}
+
+export function useSession(id: string | undefined) {
+  return useQuery({
+    queryKey: ["session_detail", id],
+    queryFn: async (): Promise<SessionFull | null> => {
+      if (!id) return null;
+      const { data, error } = await supabase
+        .from("sessions")
+        .select("*")
+        .eq("id", id)
+        .maybeSingle();
+      if (error) throw error;
+      return data as unknown as SessionFull | null;
+    },
+    enabled: !!id,
+    staleTime: 30_000,
+  });
+}
+
+// ─── Interventions ────────────────────────────────────────────────────────────
+
+export interface Intervention {
+  id: string;
+  session_id: string;
+  deputy_id: string | null;
+  deputy_name: string;
+  party: string | null;
+  type: string;
+  sequence_number: number | null;
+  text: string;
+  word_count: number | null;
+  estimated_duration_seconds: number | null;
+  applause_from: string[] | null;
+  protests_from: string[] | null;
+  interrupted_by: string[] | null;
+  was_mic_cutoff: boolean;
+  filler_word_count: number;
+  filler_words_detail: Record<string, number> | null;
+  topic_tags: string[] | null;
+}
+
+export function useInterventions(sessionId: string | undefined) {
+  return useQuery({
+    queryKey: ["interventions", sessionId],
+    queryFn: async (): Promise<Intervention[]> => {
+      if (!sessionId) return [];
+      const { data, error } = await supabase
+        .from("interventions")
+        .select("*")
+        .eq("session_id", sessionId)
+        .order("sequence_number", { ascending: true });
+      if (error) throw error;
+      return (data ?? []) as unknown as Intervention[];
+    },
+    enabled: !!sessionId,
+    staleTime: 60_000,
+  });
+}
+
+// ─── Votes ────────────────────────────────────────────────────────────────────
+
+export interface Vote {
+  id: string;
+  session_id: string;
+  agenda_item_id: string | null;
+  initiative_reference: string | null;
+  description: string | null;
+  result: string | null;
+  favor: string[] | null;
+  against: string[] | null;
+  abstain: string[] | null;
+  dissidents: Array<{ name: string; party: string; vote: string }> | null;
+  sequence_number: number | null;
+}
+
+export function useVotes(sessionId: string | undefined) {
+  return useQuery({
+    queryKey: ["votes", sessionId],
+    queryFn: async (): Promise<Vote[]> => {
+      if (!sessionId) return [];
+      const { data, error } = await supabase
+        .from("votes")
+        .select("*")
+        .eq("session_id", sessionId)
+        .order("sequence_number", { ascending: true });
+      if (error) throw error;
+      return (data ?? []) as unknown as Vote[];
+    },
+    enabled: !!sessionId,
+    staleTime: 60_000,
+  });
+}
+
+// ─── Deputy activity (materialized view) ──────────────────────────────────────
+
+export interface DeputyActivity {
+  id: string;
+  name: string;
+  party: string;
+  constituency: string | null;
+  sessions_active: number;
+  total_interventions: number;
+  total_words: number;
+  mic_cutoffs: number;
+  total_filler_words: number;
+}
+
+export function useDeputyActivity() {
+  return useQuery({
+    queryKey: ["deputy_activity"],
+    queryFn: async (): Promise<DeputyActivity[]> => {
+      const { data, error } = await supabase
+        .from("deputy_activity")
+        .select("*")
+        .order("total_words", { ascending: false })
+        .limit(230);
+      if (error) {
+        // View may not exist yet — return empty
+        console.warn("[deputy_activity]", error.message);
+        return [];
+      }
+      return (data ?? []) as unknown as DeputyActivity[];
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
+// ─── Full-text search ─────────────────────────────────────────────────────────
+
+export interface SearchResult {
+  id: string;
+  date: string;
+  session_number: number | null;
+  legislatura: string | null;
+  summary_pt: string | null;
+  snippet?: string;
+}
+
+export function useSearchSessions(query: string, party?: string, leg?: string) {
+  return useQuery({
+    queryKey: ["search_sessions", query, party, leg],
+    queryFn: async (): Promise<SearchResult[]> => {
+      if (!query.trim()) return [];
+      // Use edge function if available; fallback to basic ilike
+      try {
+        const params = new URLSearchParams({ q: query });
+        if (party) params.set("party", party);
+        if (leg)   params.set("leg",   leg);
+        const { data, error } = await supabase.functions.invoke("search-sessions", {
+          body: { q: query, party, leg },
+        });
+        if (!error && Array.isArray(data)) return data as SearchResult[];
+      } catch {
+        // fallback
+      }
+      // Simple fallback: ilike on summary_pt
+      const { data } = await supabase
+        .from("sessions")
+        .select("id,date,session_number,legislatura,summary_pt")
+        .ilike("summary_pt", `%${query}%`)
+        .order("date", { ascending: false })
+        .limit(20);
+      return (data ?? []) as unknown as SearchResult[];
+    },
+    enabled: query.trim().length > 2,
+    staleTime: 30_000,
+  });
+}
+
+// ─── Party positions ──────────────────────────────────────────────────────────
+
+export interface PartyPosition {
+  id: string;
+  topic: string;
+  party: string;
+  session_id: string;
+  position_summary: string | null;
+  vote_alignment: string | null;
+}
+
+export function usePartyPositions(party?: string, topic?: string) {
+  return useQuery({
+    queryKey: ["party_positions", party, topic],
+    queryFn: async (): Promise<PartyPosition[]> => {
+      let q = supabase.from("party_positions").select("*");
+      if (party) q = q.eq("party", party);
+      if (topic) q = q.ilike("topic", `%${topic}%`);
+      const { data, error } = await q.order("created_at", { ascending: false }).limit(100);
+      if (error) {
+        console.warn("[party_positions]", error.message);
+        return [];
+      }
+      return (data ?? []) as unknown as PartyPosition[];
+    },
+    staleTime: 2 * 60_000,
+  });
+}
+
 export function useFillerTrend() {
   return useQuery({
     queryKey: ["filler_trend"],
