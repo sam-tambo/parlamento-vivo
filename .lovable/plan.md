@@ -1,39 +1,37 @@
 
 
-## Diagnosis
+## Fix Build Errors in Edge Functions
 
-The `transcribe` edge function is returning **502 errors** because the HuggingFace Whisper Inference API rejects `multipart/form-data`. The error from HF is explicit:
+The errors are all caused by `createClient()` being called without generic type parameters, so the Supabase JS client infers table types as `never`. The fix is to use `createClient<any>(...)` in both edge functions so all `.from()` queries return `any` instead of `never`.
 
-> Content type "multipart/form-data; boundary=..." not supported.
+### Changes
 
-The previous "fix" incorrectly changed from raw binary (`application/octet-stream`) to `FormData`. According to the current HF Inference Providers documentation, the ASR endpoint accepts **raw audio bytes** when no parameters are provided.
+**1. `supabase/functions/transcribe/index.ts`**
+- Line 34: Change `import { createClient } from "jsr:@supabase/supabase-js@2";` — no change needed here
+- Line 246: Change `type SupabaseClient = ReturnType<typeof createClient>;` to use the `any` generic
+- Line 357-359: Change `createClient(...)` to `createClient<any>(...)`
 
-## Root Cause
+**2. `supabase/functions/scrape-plenario/index.ts`**  
+- Line 70: Change `type SupabaseClient = ReturnType<typeof createClient>;` to `type SupabaseClient = ReturnType<typeof createClient<any>>;`
+- All `createClient(...)` calls: Change to `createClient<any>(...)`
 
-In `supabase/functions/transcribe/index.ts`, the `transcribeWithHF` function wraps audio in `FormData` (lines 106-108), but HF's router expects raw bytes with `Content-Type: audio/mpeg` or `application/octet-stream`.
+This is a 2-file, ~4-line change that resolves all 19 build errors by telling the Supabase client to use `any` for database types (edge functions don't have access to the generated types file).
 
-## Fix
+### Dashboard Feature
 
-Revert the `transcribeWithHF` function to send raw bytes:
+After fixing the build errors, create an HF usage monitoring dashboard:
 
-```typescript
-const resp = await fetch(url, {
-  method: "POST",
-  headers: {
-    Authorization: `Bearer ${hfToken}`,
-    "Content-Type": "audio/mpeg",
-    "X-Wait-For-Model": "true",
-  },
-  body: audioBytes,
-  signal: AbortSignal.timeout(60_000),
-});
-```
+**3. New database table: `hf_usage_log`**
+- `id`, `function_name`, `model_used`, `audio_bytes`, `duration_seconds`, `tokens_estimated`, `cost_estimated`, `created_at`
+- Populated by the `transcribe` edge function after each successful HF call
 
-Changes:
-- Remove `FormData` and `Blob` construction (lines 106-108)
-- Set explicit `Content-Type: audio/mpeg` header
-- Pass `audioBytes` directly as the request body
-- Redeploy the `transcribe` edge function
+**4. Update `supabase/functions/transcribe/index.ts`**
+- After successful transcription, insert a row into `hf_usage_log` with audio size, model used, elapsed time, and estimated cost
+- Cost estimation: HF Inference API Pro charges ~$0.06/hr of audio; ~30s chunks ≈ $0.0008/call
 
-This is a single-file change in `supabase/functions/transcribe/index.ts`, approximately 5 lines modified.
+**5. New page: `src/pages/HFDashboard.tsx`**
+- Query `hf_usage_log` for usage stats
+- Show: total calls today/week/month, total audio processed, estimated cost breakdown
+- Charts using recharts: calls over time, cumulative cost, audio volume
+- Add route `/hf-dashboard` in App.tsx
 
