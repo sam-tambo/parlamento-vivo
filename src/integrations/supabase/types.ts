@@ -32,6 +32,39 @@ export type Database = {
         }
         Relationships: []
       }
+      hf_usage_log: {
+        Row: {
+          audio_bytes: number
+          cost_estimated: number | null
+          created_at: string
+          duration_seconds: number | null
+          function_name: string
+          id: string
+          model_used: string | null
+          tokens_estimated: number | null
+        }
+        Insert: {
+          audio_bytes?: number
+          cost_estimated?: number | null
+          created_at?: string
+          duration_seconds?: number | null
+          function_name?: string
+          id?: string
+          model_used?: string | null
+          tokens_estimated?: number | null
+        }
+        Update: {
+          audio_bytes?: number
+          cost_estimated?: number | null
+          created_at?: string
+          duration_seconds?: number | null
+          function_name?: string
+          id?: string
+          model_used?: string | null
+          tokens_estimated?: number | null
+        }
+        Relationships: []
+      }
       plenario_import_jobs: {
         Row: {
           completed_at: string | null
