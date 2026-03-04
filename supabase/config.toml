@@ -14,3 +14,6 @@ verify_jwt = false
 
 [functions.scrape-politicians]
 verify_jwt = false
+
+[functions.get-service-key]
+verify_jwt = false
