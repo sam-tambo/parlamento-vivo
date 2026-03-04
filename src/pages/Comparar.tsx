@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { motion } from "framer-motion";
-import { GitCompare, ArrowLeftRight } from "lucide-react";
+import { GitCompare, ArrowLeftRight, Scale } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -18,7 +18,7 @@ import {
   Tooltip,
   Cell,
 } from "recharts";
-import { usePoliticians, type Politician } from "@/lib/queries";
+import { usePoliticians, usePartyPositions, type Politician } from "@/lib/queries";
 import { gradeFillerRate, FILLER_CATALOG, CATEGORY_COLORS } from "@/lib/filler-words";
 import { PARTY_COLORS } from "@/lib/mock-data";
 
@@ -105,6 +105,7 @@ function StatRow({ label, a, b, better }: { label: string; a: string; b: string;
 export default function Comparar() {
   const { data: politicians = [] } = usePoliticians();
   const active = politicians.filter(p => p.total_speeches > 0);
+  const { data: partyPositions = [] } = usePartyPositions();
 
   const [aId, setAId] = useState<string>(active[0]?.id ?? "");
   const [bId, setBId] = useState<string>(active[1]?.id ?? "");
@@ -263,18 +264,148 @@ export default function Comparar() {
               <p className="text-sm text-muted-foreground">Sem discursos analisados.</p>
             ) : (
               <FillerBarChart
-                data={Object.entries(pol as any)
-                  .filter(([k]) => k === "total_filler_count")
-                  .length > 0
-                  ? generateFillerSample(pol)
-                  : []}
+                data={
+                  Object.entries(pol as Record<string, unknown>)
+                    .filter(([k]) => k === "total_filler_count")
+                    .length > 0
+                    ? generateFillerSample(pol)
+                    : []
+                }
                 color={color}
               />
             )}
           </div>
         ))}
       </div>
+
+      {/* Party positions from DAR archive */}
+      {partyPositions.length > 0 && polA && polB && (
+        <PartyPositionsPanel
+          partyA={polA.party}
+          partyB={polB.party}
+          colorA={colorA}
+          colorB={colorB}
+          positions={partyPositions}
+        />
+      )}
     </div>
+  );
+}
+
+// ─── Party Positions Panel ────────────────────────────────────────────────────
+
+function PartyPositionsPanel({
+  partyA,
+  partyB,
+  colorA,
+  colorB,
+  positions,
+}: {
+  partyA: string;
+  partyB: string;
+  colorA: string;
+  colorB: string;
+  positions: ReturnType<typeof usePartyPositions>["data"] extends (infer T)[] | undefined ? T[] : never;
+}) {
+  const alignmentColor = (v: string | null) =>
+    v === "favor" ? "hsl(145 60% 45%)"
+    : v === "against" ? "hsl(0 70% 50%)"
+    : v === "abstain" ? "hsl(220 20% 60%)"
+    : "hsl(220 20% 60%)";
+
+  const alignmentLabel = (v: string | null) =>
+    v === "favor" ? "A favor"
+    : v === "against" ? "Contra"
+    : v === "abstain" ? "Abstenção"
+    : v === "mixed" ? "Dividido"
+    : "—";
+
+  // Get all unique topics where both parties have positions
+  const topics = [
+    ...new Set(positions.map(p => p.topic)),
+  ].filter(topic => {
+    const hasA = positions.some(p => p.party === partyA && p.topic === topic);
+    const hasB = positions.some(p => p.party === partyB && p.topic === topic);
+    return hasA || hasB;
+  }).slice(0, 12);
+
+  if (topics.length === 0) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.2 }}
+      className="mt-8"
+    >
+      <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
+        <Scale className="h-5 w-5 text-primary" />
+        Posições partidárias — arquivo DAR
+      </h2>
+      <div className="glass-card rounded-xl overflow-hidden">
+        {/* Header */}
+        <div className="grid grid-cols-3 gap-4 px-4 py-2 bg-secondary/40 text-xs font-semibold text-muted-foreground">
+          <span style={{ color: colorA }}>{partyA}</span>
+          <span className="text-center">Tema</span>
+          <span className="text-right" style={{ color: colorB }}>{partyB}</span>
+        </div>
+        {topics.map((topic, i) => {
+          const posA = positions.find(p => p.party === partyA && p.topic === topic);
+          const posB = positions.find(p => p.party === partyB && p.topic === topic);
+          return (
+            <div
+              key={topic}
+              className={`grid grid-cols-3 gap-4 px-4 py-3 text-sm items-start ${
+                i % 2 === 0 ? "" : "bg-secondary/20"
+              }`}
+            >
+              <div className="space-y-0.5">
+                {posA ? (
+                  <>
+                    <span
+                      className="text-[10px] font-bold uppercase"
+                      style={{ color: alignmentColor(posA.vote_alignment) }}
+                    >
+                      {alignmentLabel(posA.vote_alignment)}
+                    </span>
+                    {posA.position_summary && (
+                      <p className="text-xs text-muted-foreground leading-tight">
+                        {posA.position_summary}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-xs text-muted-foreground/40">—</span>
+                )}
+              </div>
+              <p className="text-center text-xs font-medium">{topic}</p>
+              <div className="space-y-0.5 text-right">
+                {posB ? (
+                  <>
+                    <span
+                      className="text-[10px] font-bold uppercase"
+                      style={{ color: alignmentColor(posB.vote_alignment) }}
+                    >
+                      {alignmentLabel(posB.vote_alignment)}
+                    </span>
+                    {posB.position_summary && (
+                      <p className="text-xs text-muted-foreground leading-tight">
+                        {posB.position_summary}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-xs text-muted-foreground/40">—</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground mt-2 text-center">
+        Posições extraídas por IA das sessões do arquivo DAR
+      </p>
+    </motion.div>
   );
 }
 
