@@ -293,10 +293,10 @@ export default function SessionDetail() {
     weekday: "long", day: "numeric", month: "long", year: "numeric",
   });
 
-  const keyDecisions = (session.key_decisions ?? []) as Array<{
+  const keyDecisions = (Array.isArray(session.key_decisions) ? session.key_decisions : []) as Array<{
     description: string; result: string; significance?: string;
   }>;
-  const notableMoments = (session.notable_moments ?? []) as Array<{
+  const notableMoments = (Array.isArray(session.notable_moments) ? session.notable_moments : []) as Array<{
     type: string; description: string; deputies_involved?: string[];
   }>;
 
