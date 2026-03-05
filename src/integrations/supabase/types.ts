@@ -14,6 +14,51 @@ export type Database = {
   }
   public: {
     Tables: {
+      agenda_items: {
+        Row: {
+          created_at: string
+          id: string
+          initiatives: Json | null
+          item_number: number | null
+          session_id: string | null
+          title: string
+          topic_category: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          initiatives?: Json | null
+          item_number?: number | null
+          session_id?: string | null
+          title: string
+          topic_category?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          initiatives?: Json | null
+          item_number?: number | null
+          session_id?: string | null
+          title?: string
+          topic_category?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agenda_items_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "agenda_items_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       filler_words: {
         Row: {
           category: string
@@ -64,6 +109,180 @@ export type Database = {
           tokens_estimated?: number | null
         }
         Relationships: []
+      }
+      interventions: {
+        Row: {
+          agenda_item_id: string | null
+          applause_from: string[] | null
+          created_at: string
+          deputy_id: string | null
+          deputy_name: string | null
+          estimated_duration_seconds: number | null
+          filler_word_count: number | null
+          filler_words_detail: Json | null
+          id: string
+          interrupted_by: string[] | null
+          key_claims: Json | null
+          party: string | null
+          protests_from: string[] | null
+          sentiment_score: number | null
+          sequence_number: number | null
+          session_id: string | null
+          text: string
+          topic_tags: string[] | null
+          type: string | null
+          was_mic_cutoff: boolean | null
+          word_count: number | null
+        }
+        Insert: {
+          agenda_item_id?: string | null
+          applause_from?: string[] | null
+          created_at?: string
+          deputy_id?: string | null
+          deputy_name?: string | null
+          estimated_duration_seconds?: number | null
+          filler_word_count?: number | null
+          filler_words_detail?: Json | null
+          id?: string
+          interrupted_by?: string[] | null
+          key_claims?: Json | null
+          party?: string | null
+          protests_from?: string[] | null
+          sentiment_score?: number | null
+          sequence_number?: number | null
+          session_id?: string | null
+          text: string
+          topic_tags?: string[] | null
+          type?: string | null
+          was_mic_cutoff?: boolean | null
+          word_count?: number | null
+        }
+        Update: {
+          agenda_item_id?: string | null
+          applause_from?: string[] | null
+          created_at?: string
+          deputy_id?: string | null
+          deputy_name?: string | null
+          estimated_duration_seconds?: number | null
+          filler_word_count?: number | null
+          filler_words_detail?: Json | null
+          id?: string
+          interrupted_by?: string[] | null
+          key_claims?: Json | null
+          party?: string | null
+          protests_from?: string[] | null
+          sentiment_score?: number | null
+          sequence_number?: number | null
+          session_id?: string | null
+          text?: string
+          topic_tags?: string[] | null
+          type?: string | null
+          was_mic_cutoff?: boolean | null
+          word_count?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "interventions_agenda_item_id_fkey"
+            columns: ["agenda_item_id"]
+            isOneToOne: false
+            referencedRelation: "agenda_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "interventions_deputy_id_fkey"
+            columns: ["deputy_id"]
+            isOneToOne: false
+            referencedRelation: "deputy_activity"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "interventions_deputy_id_fkey"
+            columns: ["deputy_id"]
+            isOneToOne: false
+            referencedRelation: "politicians"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "interventions_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "interventions_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      legislaturas: {
+        Row: {
+          description: string | null
+          end_date: string | null
+          id: string
+          start_date: string | null
+        }
+        Insert: {
+          description?: string | null
+          end_date?: string | null
+          id: string
+          start_date?: string | null
+        }
+        Update: {
+          description?: string | null
+          end_date?: string | null
+          id?: string
+          start_date?: string | null
+        }
+        Relationships: []
+      }
+      party_positions: {
+        Row: {
+          created_at: string
+          id: string
+          party: string
+          position_summary: string | null
+          session_id: string | null
+          topic: string
+          vote_alignment: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          party: string
+          position_summary?: string | null
+          session_id?: string | null
+          topic: string
+          vote_alignment?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          party?: string
+          position_summary?: string | null
+          session_id?: string | null
+          topic?: string
+          vote_alignment?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "party_positions_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "party_positions_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       plenario_import_jobs: {
         Row: {
@@ -163,60 +382,116 @@ export type Database = {
       }
       sessions: {
         Row: {
+          analysis_status: string | null
           artv_stream_url: string | null
           artv_video_url: string | null
           created_at: string
           dar_url: string | null
           date: string
+          deputies_present: number | null
           end_time: string | null
+          full_text: string | null
           id: string
+          key_decisions: Json | null
           last_hls_segment: string | null
           last_hls_sequence: number | null
           legislatura: string | null
+          notable_moments: Json | null
+          president_name: string | null
           session_number: number | null
           start_time: string | null
           status: string
+          summary_en: string | null
+          summary_pt: string | null
           total_filler_count: number | null
           total_speaking_minutes: number | null
           transcript_status: string
         }
         Insert: {
+          analysis_status?: string | null
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
           dar_url?: string | null
           date: string
+          deputies_present?: number | null
           end_time?: string | null
+          full_text?: string | null
           id?: string
+          key_decisions?: Json | null
           last_hls_segment?: string | null
           last_hls_sequence?: number | null
           legislatura?: string | null
+          notable_moments?: Json | null
+          president_name?: string | null
           session_number?: number | null
           start_time?: string | null
           status?: string
+          summary_en?: string | null
+          summary_pt?: string | null
           total_filler_count?: number | null
           total_speaking_minutes?: number | null
           transcript_status?: string
         }
         Update: {
+          analysis_status?: string | null
           artv_stream_url?: string | null
           artv_video_url?: string | null
           created_at?: string
           dar_url?: string | null
           date?: string
+          deputies_present?: number | null
           end_time?: string | null
+          full_text?: string | null
           id?: string
+          key_decisions?: Json | null
           last_hls_segment?: string | null
           last_hls_sequence?: number | null
           legislatura?: string | null
+          notable_moments?: Json | null
+          president_name?: string | null
           session_number?: number | null
           start_time?: string | null
           status?: string
+          summary_en?: string | null
+          summary_pt?: string | null
           total_filler_count?: number | null
           total_speaking_minutes?: number | null
           transcript_status?: string
         }
         Relationships: []
+      }
+      sessoes_legislativas: {
+        Row: {
+          end_date: string | null
+          id: string
+          legislatura_id: string | null
+          number: number | null
+          start_date: string | null
+        }
+        Insert: {
+          end_date?: string | null
+          id: string
+          legislatura_id?: string | null
+          number?: number | null
+          start_date?: string | null
+        }
+        Update: {
+          end_date?: string | null
+          id?: string
+          legislatura_id?: string | null
+          number?: number | null
+          start_date?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sessoes_legislativas_legislatura_id_fkey"
+            columns: ["legislatura_id"]
+            isOneToOne: false
+            referencedRelation: "legislaturas"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       speeches: {
         Row: {
@@ -256,6 +531,13 @@ export type Database = {
           transcript_excerpt?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "speeches_politician_id_fkey"
+            columns: ["politician_id"]
+            isOneToOne: false
+            referencedRelation: "deputy_activity"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "speeches_politician_id_fkey"
             columns: ["politician_id"]
@@ -321,6 +603,13 @@ export type Database = {
             foreignKeyName: "transcript_events_politician_id_fkey"
             columns: ["politician_id"]
             isOneToOne: false
+            referencedRelation: "deputy_activity"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "transcript_events_politician_id_fkey"
+            columns: ["politician_id"]
+            isOneToOne: false
             referencedRelation: "politicians"
             referencedColumns: ["id"]
           },
@@ -340,8 +629,141 @@ export type Database = {
           },
         ]
       }
+      vote_declarations: {
+        Row: {
+          created_at: string
+          deputy_id: string | null
+          id: string
+          party: string | null
+          summary: string | null
+          text: string | null
+          vote_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          deputy_id?: string | null
+          id?: string
+          party?: string | null
+          summary?: string | null
+          text?: string | null
+          vote_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          deputy_id?: string | null
+          id?: string
+          party?: string | null
+          summary?: string | null
+          text?: string | null
+          vote_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "vote_declarations_deputy_id_fkey"
+            columns: ["deputy_id"]
+            isOneToOne: false
+            referencedRelation: "deputy_activity"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "vote_declarations_deputy_id_fkey"
+            columns: ["deputy_id"]
+            isOneToOne: false
+            referencedRelation: "politicians"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "vote_declarations_vote_id_fkey"
+            columns: ["vote_id"]
+            isOneToOne: false
+            referencedRelation: "votes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      votes: {
+        Row: {
+          abstain: string[] | null
+          against: string[] | null
+          agenda_item_id: string | null
+          created_at: string
+          description: string | null
+          dissidents: Json | null
+          favor: string[] | null
+          id: string
+          initiative_reference: string | null
+          result: string | null
+          sequence_number: number | null
+          session_id: string | null
+        }
+        Insert: {
+          abstain?: string[] | null
+          against?: string[] | null
+          agenda_item_id?: string | null
+          created_at?: string
+          description?: string | null
+          dissidents?: Json | null
+          favor?: string[] | null
+          id?: string
+          initiative_reference?: string | null
+          result?: string | null
+          sequence_number?: number | null
+          session_id?: string | null
+        }
+        Update: {
+          abstain?: string[] | null
+          against?: string[] | null
+          agenda_item_id?: string | null
+          created_at?: string
+          description?: string | null
+          dissidents?: Json | null
+          favor?: string[] | null
+          id?: string
+          initiative_reference?: string | null
+          result?: string | null
+          sequence_number?: number | null
+          session_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "votes_agenda_item_id_fkey"
+            columns: ["agenda_item_id"]
+            isOneToOne: false
+            referencedRelation: "agenda_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "votes_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "live_session_status"
+            referencedColumns: ["session_id"]
+          },
+          {
+            foreignKeyName: "votes_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
+      deputy_activity: {
+        Row: {
+          constituency: string | null
+          id: string | null
+          mic_cutoffs: number | null
+          name: string | null
+          party: string | null
+          sessions_active: number | null
+          total_filler_words: number | null
+          total_interventions: number | null
+          total_words: number | null
+        }
+        Relationships: []
+      }
       live_session_status: {
         Row: {
           artv_stream_url: string | null
@@ -364,6 +786,22 @@ export type Database = {
       refresh_politician_stats: {
         Args: { p_politician_id: string }
         Returns: undefined
+      }
+      search_sessions_fts: {
+        Args: {
+          filter_leg?: string
+          filter_party?: string
+          query_text: string
+          result_limit?: number
+        }
+        Returns: {
+          date: string
+          id: string
+          legislatura: string
+          session_number: number
+          snippet: string
+          summary_pt: string
+        }[]
       }
       update_session_hls_url: {
         Args: { p_hls_url: string; p_session_id: string }
