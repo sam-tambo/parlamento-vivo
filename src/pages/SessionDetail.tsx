@@ -65,7 +65,7 @@ function VoteCard({ vote }: { vote: Vote }) {
   const favor = vote.favor ?? [];
   const against = vote.against ?? [];
   const abstain = vote.abstain ?? [];
-  const dissidents = vote.dissidents ?? [];
+  const dissidents = Array.isArray(vote.dissidents) ? vote.dissidents : [];
   const isApproved = vote.result === "aprovado";
 
   return (

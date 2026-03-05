@@ -768,9 +768,9 @@ export function useVoteDeclarations(sessionId: string | undefined) {
     queryKey: ["vote_declarations", sessionId],
     queryFn: async (): Promise<VoteDeclaration[]> => {
       if (!sessionId) return [];
-      const { data, error } = await supabase
+      const { data, error } = await (supabase
         .from("vote_declarations")
-        .select("*")
+        .select("*") as any)
         .eq("session_id", sessionId);
       if (error) {
         console.warn("[vote_declarations]", error.message);

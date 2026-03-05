@@ -12,6 +12,7 @@ import {
   useTopFillerWords,
   useGlobalStats,
   useDeputyActivity,
+  useSessions,
 } from "@/lib/queries";
 import { PARTY_COLORS } from "@/lib/mock-data";
 import { CATEGORY_COLORS, CATEGORY_LABELS, FILLER_CATALOG, gradeFillerRate } from "@/lib/filler-words";
@@ -33,7 +34,8 @@ export default function Stats() {
   const { data: trend = [] } = useFillerTrend();
   const { data: topWords = [] } = useTopFillerWords();
   const { data: globalStats } = useGlobalStats();
-  const { data: deputyActivity = [] } = useDeputyActivity();
+  const { data: darActivity = [] } = useDeputyActivity();
+  const { data: sessions = [] } = useSessions();
 
   const active = politicians.filter(p => p.total_speeches > 0);
   const totalFillers = politicians.reduce((s, p) => s + p.total_filler_count, 0);

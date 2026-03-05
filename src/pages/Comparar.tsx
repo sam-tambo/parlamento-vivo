@@ -265,7 +265,7 @@ export default function Comparar() {
             ) : (
               <FillerBarChart
                 data={
-                  Object.entries(pol as Record<string, unknown>)
+                  Object.entries(pol as unknown as Record<string, unknown>)
                     .filter(([k]) => k === "total_filler_count")
                     .length > 0
                     ? generateFillerSample(pol)
