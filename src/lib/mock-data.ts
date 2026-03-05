@@ -1,16 +1,18 @@
 // Mock data for development before real data is connected
 
-export const PARTIES = ["PS", "PSD", "CH", "IL", "BE", "PCP", "L", "PAN"] as const;
+export const PARTIES = ["PS", "PSD", "CH", "IL", "BE", "PCP", "L", "PAN", "CDS-PP", "JPP"] as const;
 
 export const PARTY_COLORS: Record<string, string> = {
-  PS: "hsl(340 70% 50%)",
-  PSD: "hsl(25 90% 55%)",
-  CH: "hsl(220 70% 40%)",
-  IL: "hsl(190 80% 50%)",
-  BE: "hsl(350 80% 45%)",
-  PCP: "hsl(0 70% 45%)",
-  L: "hsl(145 60% 40%)",
-  PAN: "hsl(160 50% 45%)",
+  PS: "#E91E63",
+  PSD: "#FF9800",
+  CH: "#1a237e",
+  IL: "#00BCD4",
+  BE: "#b71c1c",
+  PCP: "#F44336",
+  L: "#4CAF50",
+  PAN: "#8BC34A",
+  "CDS-PP": "#2196F3",
+  JPP: "#9C27B0",
 };
 
 export const FILLER_WORDS = [

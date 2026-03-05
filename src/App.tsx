@@ -8,6 +8,8 @@ import Index from "./pages/Index";
 import AoVivo from "./pages/AoVivo";
 import Speeches from "./pages/Speeches";
 import Politicians from "./pages/Politicians";
+import Deputies from "./pages/Deputies";
+import DeputyDetail from "./pages/DeputyDetail";
 import Stats from "./pages/Stats";
 import FillerWords from "./pages/FillerWords";
 import Comparar from "./pages/Comparar";
@@ -35,16 +37,19 @@ const App = () => (
         <Navbar />
         <Routes>
           <Route path="/"             element={<Index />} />
+          <Route path="/sessoes"      element={<Sessions />} />
+          <Route path="/sessao/:id"   element={<SessionDetail />} />
+          <Route path="/deputados"    element={<Deputies />} />
+          <Route path="/deputado/:id" element={<DeputyDetail />} />
+          <Route path="/pesquisa"     element={<Search />} />
+          <Route path="/estatisticas" element={<Stats />} />
+          {/* Legacy / secondary pages */}
           <Route path="/ao-vivo"      element={<AoVivo />} />
           <Route path="/discursos"    element={<Speeches />} />
           <Route path="/palavras"     element={<FillerWords />} />
           <Route path="/participacao" element={<Politicians />} />
           <Route path="/comparar"     element={<Comparar />} />
-          <Route path="/estatisticas" element={<Stats />} />
           <Route path="/plenario"     element={<Plenario />} />
-          <Route path="/sessoes"      element={<Sessions />} />
-          <Route path="/sessao/:id"   element={<SessionDetail />} />
-          <Route path="/pesquisa"     element={<Search />} />
           {/* Legacy redirects */}
           <Route path="/speeches"     element={<Speeches />} />
           <Route path="/politicians"  element={<Politicians />} />

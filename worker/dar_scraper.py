@@ -2,7 +2,7 @@
 """
 dar_scraper.py — Scrape DAR (Diário da Assembleia da República) plenary session data
 =====================================================================================
-Downloads structured XML from the Parliament API and upserts sessions, agenda items,
+Downloads PDFs from parlamento.pt and upserts sessions, agenda items,
 interventions, votes and vote declarations to Supabase.
 
 Builds on the Parliament API helpers already established in dar_profiles.py.
@@ -14,7 +14,7 @@ USAGE:
   python dar_scraper.py run [--leg XVII] [--n 10]       # Full pipeline
 
 REQUIREMENTS:
-  pip install requests
+  pip install requests pdfplumber
   export SUPABASE_URL=https://...supabase.co
   export SUPABASE_SERVICE_KEY=...
 """
@@ -22,6 +22,7 @@ REQUIREMENTS:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -33,15 +34,19 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 
+import pdfplumber
+import requests as _requests
+from bs4 import BeautifulSoup as _BS
+
 # ─── Config ────────────────────────────────────────────────────────────────────
 
 SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
-DAR_SESSIONS_API = "https://app.parlamento.pt/webutils/docs/DAR1Serie.aspx"
-RATE_LIMIT_SEC   = 1.0  # politeness delay between parliament.pt requests
+DAR_WEB_URL  = "https://www.parlamento.pt/DAR/Paginas/DAR1Serie.aspx"
+RATE_LIMIT_SEC = 1.0  # politeness delay between parliament.pt requests
 
-DATA_DIR = Path(__file__).parent / "data" / "xml"
+DATA_DIR = Path(__file__).parent / "data" / "pdf"
 
 # ─── Supabase helpers ──────────────────────────────────────────────────────────
 
@@ -151,42 +156,180 @@ def _parse_time(s: Optional[str]) -> Optional[float]:
     return None
 
 
-# ─── Parliament API — session list ────────────────────────────────────────────
+# ─── Parliament web scraper — session list ────────────────────────────────────
 
-def fetch_dar_session_list(leg: str = "XVII", max_sessions: int = 200) -> list[dict]:
-    """Return list of {number, date, dar_xml_url, title} from Parliament API."""
-    url = f"{DAR_SESSIONS_API}?Leg={leg}&pType=ata"
-    print(f"Fetching session list: {url}")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "parlamento-aberto/1.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            raw = r.read()
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        return []
+_HTTP_HEADERS = {
+    "User-Agent": "parlamento-aberto/1.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+}
 
-    try:
-        root = _strip_ns(ET.fromstring(raw))
-    except ET.ParseError:
-        print("  ERROR: could not parse session list XML")
-        return []
 
-    sessions = []
-    for node in root.iter():
-        num     = _first_text(node, ["numero", "Numero", "num", "Num"])
-        date    = _first_text(node, ["data", "Data", "date"])
-        doc_url = _first_text(node, ["urlFicheiro", "UrlFicheiro", "url", "URL"])
-        title   = _first_text(node, ["titulo", "Titulo", "title"])
-        if num and date and re.match(r"\d{4}-\d{2}-\d{2}", date):
-            sessions.append({
-                "number":      num,
-                "date":        date[:10],
-                "dar_xml_url": doc_url or "",
-                "title":       title or f"Sessão Plenária {num}",
-            })
+def _extract_form_data(soup: "_BS") -> dict:
+    """Pull all hidden ASP.NET form fields from the page."""
+    data: dict[str, str] = {}
+    form = soup.find("form", {"id": "aspnetForm"}) or soup.find("form")
+    if not form:
+        return data
+    for inp in form.find_all("input", {"type": "hidden"}):
+        name = inp.get("name")
+        if name:
+            data[name] = inp.get("value", "")
+    return data
+
+
+def _do_postback(
+    http: "_requests.Session",
+    soup: "_BS",
+    event_target: str,
+    field_name: str,
+    field_value: str,
+) -> Optional["_BS"]:
+    """Submit an ASP.NET __doPostBack and return the new page soup."""
+    form_data = _extract_form_data(soup)
+    form_data["__EVENTTARGET"]   = event_target
+    form_data["__EVENTARGUMENT"] = ""
+    form_data["__LASTFOCUS"]     = ""
+    form_data[field_name]        = field_value
+
+    # Include all visible select values so SharePoint doesn't barf
+    for sel in soup.find_all("select"):
+        sel_name = sel.get("name", "")
+        if sel_name and sel_name not in form_data:
+            chosen = sel.find("option", selected=True)
+            if chosen:
+                form_data[sel_name] = chosen.get("value", "")
+
+    resp = http.post(DAR_WEB_URL, data=form_data, timeout=45)
+    if resp.status_code != 200:
+        print(f"  Postback HTTP {resp.status_code}")
+        return None
+    return _BS(resp.text, "lxml")
+
+
+def _parse_dar_entries(soup: "_BS") -> list[dict]:
+    """Extract DAR entries from a parsed page."""
+    sessions: list[dict] = []
+    for a in soup.find_all("a", id=re.compile(r"_hplTitulo$")):
+        title    = a.get_text(strip=True)
+        pdf_url  = a.get("href", "")
+
+        # Derive issue number from the filename param fich=DAR-I-NNN.pdf
+        num_match = re.search(r"fich=DAR-I-(\d+)", pdf_url, re.I)
+        if not num_match:
+            # Fall back to extracting from title "DAR I Série n.º NNN"
+            num_match = re.search(r"n\.º\s*(\d+)", title, re.I)
+        number = num_match.group(1).lstrip("0") if num_match else ""
+
+        # Sibling span with lblData
+        row = a.find_parent("div", class_=re.compile(r"row"))
+        date_str = ""
+        if row:
+            lbl = row.find("span", id=re.compile(r"_lblData$"))
+            if lbl:
+                date_str = lbl.get_text(strip=True)
+
+        if not (title and pdf_url and date_str):
+            continue
+
+        sessions.append({
+            "number":      number,
+            "date":        date_str[:10],      # "2026-02-21"
+            "dar_xml_url": pdf_url,            # PDF link (legacy field name kept)
+            "title":       title,
+        })
 
     sessions.sort(key=lambda s: s["date"], reverse=True)
-    print(f"  Found {len(sessions)} sessions.")
+    return sessions
+
+
+def fetch_dar_session_list(leg: str = "XVII", sessao: int = 1, max_sessions: int = 200) -> list[dict]:
+    """
+    Scrape DAR I Série session list from the parliament website.
+    Uses ASP.NET postbacks to switch between legislaturas / sessions.
+    Returns list of {number, date, dar_xml_url (PDF), title}.
+    """
+    print(f"Fetching DAR session list for {leg} Legislatura, sessão {sessao} …")
+    http = _requests.Session()
+    http.headers.update(_HTTP_HEADERS)
+
+    # ── Step 1: GET the initial page ─────────────────────────────────────────
+    try:
+        resp = http.get(DAR_WEB_URL, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  ERROR fetching page: {e}")
+        return []
+
+    soup = _BS(resp.text, "lxml")
+
+    # ── Step 2: Find dropdown names and available options ────────────────────
+    ddl_leg = soup.find("select", {"title": "Legislatura"})
+    ddl_ses = soup.find("select", {"title": "Sessão Legislativa"})
+
+    if ddl_leg is None:
+        print("  ERROR: Legislatura dropdown not found.")
+        return []
+
+    ddl_leg_name: str = ddl_leg.get("name", "")
+    ddl_ses_name: str = ddl_ses.get("name", "") if ddl_ses else ""
+
+    # Build map: Roman numeral → option value (internal arnet URL)
+    leg_map: dict[str, str] = {}
+    for opt in ddl_leg.find_all("option"):
+        text = opt.get_text(strip=True)
+        m = re.match(r"^([IVXLCDM]+)\s+Legislatura", text)
+        if m:
+            leg_map[m.group(1)] = opt.get("value", "")
+
+    if leg not in leg_map:
+        print(f"  ERROR: '{leg}' not found. Available: {list(leg_map.keys())}")
+        return []
+
+    target_leg_val = leg_map[leg]
+
+    # ── Step 3: If not the default legislatura, postback to change it ────────
+    current_leg = (ddl_leg.find("option", selected=True) or {}).get("value", "")
+
+    if current_leg != target_leg_val:
+        print(f"  Switching to {leg} Legislatura …")
+        soup = _do_postback(http, soup, ddl_leg_name, ddl_leg_name, target_leg_val)
+        if soup is None:
+            return []
+        time.sleep(RATE_LIMIT_SEC)
+        # Re-find the sessão dropdown in the updated page
+        ddl_ses = soup.find("select", {"title": "Sessão Legislativa"})
+        if ddl_ses:
+            ddl_ses_name = ddl_ses.get("name", "")
+
+    # ── Step 4: Switch sessão if needed ──────────────────────────────────────
+    if ddl_ses_name:
+        ddl_ses = soup.find("select", {"title": "Sessão Legislativa"})
+        if ddl_ses:
+            ses_opts = ddl_ses.find_all("option")
+            # sessao=1 means 1st session (index 0), but they may be newest-first
+            # Match by ordinal text ("1.ª", "2.ª", ...) or fall back to index
+            target_ses_val = None
+            ordinals = ["1.ª", "2.ª", "3.ª", "4.ª"]
+            target_ord = ordinals[sessao - 1] if sessao <= len(ordinals) else None
+            for opt in ses_opts:
+                if target_ord and opt.get_text(strip=True).startswith(target_ord):
+                    target_ses_val = opt.get("value", "")
+                    break
+            if target_ses_val is None and sessao <= len(ses_opts):
+                target_ses_val = ses_opts[sessao - 1].get("value", "")
+
+            current_ses = (ddl_ses.find("option", selected=True) or {}).get("value", "")
+            if target_ses_val and current_ses != target_ses_val:
+                print(f"  Switching to sessão {sessao} …")
+                soup = _do_postback(http, soup, ddl_ses_name, ddl_ses_name, target_ses_val)
+                if soup is None:
+                    return []
+                time.sleep(RATE_LIMIT_SEC)
+
+    # ── Step 5: Parse entries from the current page ───────────────────────────
+    sessions = _parse_dar_entries(soup)
+    print(f"  Found {len(sessions)} DAR entries.")
     return sessions[:max_sessions]
 
 
@@ -195,7 +338,7 @@ def fetch_dar_session_list(leg: str = "XVII", max_sessions: int = 200) -> list[d
 def _cache_path(leg: str, session_num: str) -> Path:
     p = DATA_DIR / leg
     p.mkdir(parents=True, exist_ok=True)
-    return p / f"dar_{session_num}.xml"
+    return p / f"dar_{session_num}.pdf"
 
 
 def download_dar_xml(leg: str, session: dict) -> Optional[bytes]:
@@ -218,14 +361,15 @@ def download_dar_xml(leg: str, session: dict) -> Optional[bytes]:
         return None
 
 
-# ─── DAR XML parser ───────────────────────────────────────────────────────────
+# ─── DAR PDF parser ───────────────────────────────────────────────────────────
 
 def _detect_cutoff(text: str) -> bool:
     """Detect if a speech was cut off mid-sentence by the presiding officer."""
     patterns = [
         r"[Tt]enha a bondade",
         r"[Oo] Sr\. Presidente.*interromp",
-        r"\[O orador.*interromp",
+        r"[Pp]or ter excedido o tempo",
+        r"microfone.*desligado",
         r"[Ss]r\. Presidente.*cortou",
         r"Esgotado o tempo",
     ]
@@ -233,14 +377,27 @@ def _detect_cutoff(text: str) -> bool:
 
 
 def _extract_stage_directions(text: str) -> dict:
-    """Pull applause, protests, interruptions from stage direction tags."""
-    applause    = re.findall(r"\[Aplausos? (?:do|da|dos|das) ([^\]]+)\]", text, re.I)
-    protests    = re.findall(r"\[Protestos? (?:do|da|dos|das) ([^\]]+)\]", text, re.I)
-    interrupted = re.findall(r"\[O orador.*?interrompido por ([^\]]+)\]", text, re.I)
+    """Pull applause, protests, interruptions from inline stage directions."""
+    # DAR PDFs use plain text like: (Aplausos do PS.) or Aplausos gerais.
+    applause = re.findall(
+        r"\(?Aplausos? (?:do|da|dos|das|gerais?)\s*([^.)]*)[.)]?",
+        text, re.I,
+    )
+    applause += re.findall(r"\(?Aplausos? gerais?[.)]?", text, re.I)
+    protests = re.findall(
+        r"\(?Protestos? (?:do|da|dos|das)\s*([^.)]*)[.)]?",
+        text, re.I,
+    )
+    interrupted = re.findall(
+        r"\(?O orador.*?interrompido por ([^.)]+)[.)]?",
+        text, re.I,
+    )
+    # Clean up empty strings from "gerais" matches
+    applause = [a.strip() or "gerais" for a in applause if a is not None]
     return {
         "applause_from": applause,
-        "protests_from": protests,
-        "interrupted_by": interrupted,
+        "protests_from": [p.strip() for p in protests],
+        "interrupted_by": [i.strip() for i in interrupted],
     }
 
 
@@ -249,7 +406,7 @@ def _count_words(text: str) -> int:
 
 
 def _filler_count(text: str) -> tuple[int, dict]:
-    """Simple filler word count (no accent stripping — fast pass)."""
+    """Simple filler word count."""
     fillers = [
         "portanto", "digamos", "ou seja", "pronto", "basicamente",
         "efetivamente", "de facto", "na verdade", "quer dizer", "tipo",
@@ -270,182 +427,219 @@ def _filler_count(text: str) -> tuple[int, dict]:
     return total, detail
 
 
-def parse_dar_xml(raw: bytes, session_meta: dict, leg: str) -> dict:
+# Speaker line in DAR I Série PDFs:
+#   "O Sr. Nome Apelido (PS): — Senhor Presidente..."
+#   "A Sr.ª Nome Apelido (BE): — ..."
+#   "O Sr. Presidente: — ..."
+_SPEAKER_RE = re.compile(
+    r"^(?:O|A)\s+Sr\.ª?\s+"       # gendered title
+    r"(.+?)"                       # name (greedy but stopped by colon or paren)
+    r"(?:\s*\(([^)]+)\))?"         # optional (Party)
+    r"\s*:\s*[—–\-]",             # colon + em-dash
+    re.MULTILINE,
+)
+
+# Vote result line patterns
+_VOTE_RESULT_RE = re.compile(
+    r"(?:Submetid[ao]|Colocad[ao]|Posta)\s+à\s+votação[^.]*?\,?\s*"
+    r"(?:foi\s+)?(aprovad\w+|rejeitad\w+|retirad\w+)",
+    re.I,
+)
+_VOTE_FAVOR_RE   = re.compile(r"votos?\s+a\s+favor\s+d[aeo]s?\s+((?:[A-Z]{1,4}(?:\s+e\s+)?)+)", re.I)
+_VOTE_AGAINST_RE = re.compile(r"(?:contra|votos?\s+contra)\s+d[aeo]s?\s+((?:[A-Z]{1,4}(?:\s+e\s+)?)+)", re.I)
+_VOTE_ABSTAIN_RE = re.compile(r"absten[çc][aã]o\s+d[aeo]s?\s+((?:[A-Z]{1,4}(?:\s+e\s+)?)+)", re.I)
+
+# Agenda item lines like "1 — Projeto de Lei n.º 42/XVI/1.ª ..."
+_AGENDA_RE = re.compile(r"^(\d+)\s*[—–]\s*(.+)", re.MULTILINE)
+
+# President mention: "Presidiu à reunião o Sr. Presidente [Name]"
+_PRESIDENT_RE = re.compile(
+    r"[Pp]residiu[^.]*?(?:o\s+Sr\.|a\s+Sr\.ª)\s+(?:Presidente\s+)?([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ][^\n,\.]+)",
+)
+
+# Deputies present: "Estiveram presentes NNN Deputados"
+_DEPUTIES_RE = re.compile(r"[Ee]stiveram presentes\s+(\d+)\s+[Dd]eputados")
+
+
+def _extract_pdf_text(raw: bytes) -> str:
+    """Extract full text from PDF bytes using pdfplumber."""
+    try:
+        with pdfplumber.open(io.BytesIO(raw)) as pdf:
+            parts = []
+            for page in pdf.pages:
+                text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts)
+    except Exception as e:
+        print(f"  pdfplumber error: {e}")
+        return ""
+
+
+def _parse_vote_block(block: str, seq: int) -> dict:
+    """Parse a vote result block into structured data."""
+    result_m = _VOTE_RESULT_RE.search(block)
+    result_word = result_m.group(1).lower() if result_m else ""
+    if "aprovad" in result_word:
+        result_label = "aprovado"
+    elif "rejeitad" in result_word:
+        result_label = "rejeitado"
+    elif "retirad" in result_word:
+        result_label = "retirado"
+    else:
+        result_label = None
+
+    def _party_split(m: Optional[re.Match]) -> list[str]:
+        if not m:
+            return []
+        raw = m.group(1)
+        return [p.strip() for p in re.split(r"\s+e\s+|,\s*", raw) if p.strip()]
+
+    # Find initiative reference in the block
+    ref_m = re.search(r"(?:Projeto|Proposta|Petição|Resolução)[^\n]*?n\.º\s*([\w/\.ª]+)", block, re.I)
+    ref = ref_m.group(1) if ref_m else None
+
+    return {
+        "initiative_reference": ref,
+        "description":          block[:200].strip(),
+        "result":               result_label,
+        "favor":                _party_split(_VOTE_FAVOR_RE.search(block)),
+        "against":              _party_split(_VOTE_AGAINST_RE.search(block)),
+        "abstain":              _party_split(_VOTE_ABSTAIN_RE.search(block)),
+        "dissidents":           None,
+        "sequence_number":      seq,
+    }
+
+
+def parse_dar_pdf(raw: bytes, session_meta: dict, leg: str) -> dict:
     """
-    Parse a DAR-I XML file into structured data.
+    Parse a DAR-I PDF into structured data using pdfplumber text extraction.
     Returns dict with keys: session, agenda_items, interventions, votes, vote_declarations.
     """
-    try:
-        root = _strip_ns(ET.fromstring(raw))
-    except ET.ParseError as e:
-        print(f"  XML parse error: {e}")
+    full_text = _extract_pdf_text(raw)
+    if not full_text.strip():
+        print("  PDF: no text extracted (possibly scanned/image PDF)")
         return {}
 
     result: dict = {
-        "session":            {},
-        "agenda_items":       [],
-        "interventions":      [],
-        "votes":              [],
-        "vote_declarations":  [],
+        "session":           {},
+        "agenda_items":      [],
+        "interventions":     [],
+        "votes":             [],
+        "vote_declarations": [],
     }
 
-    # ── Session metadata ───────────────────────────────────────────────────────
-    # Look for <sessao>, <reuniao>, <plenario> root elements
-    session_node = (
-        root.find("sessao") or root.find("reuniao") or
-        root.find("plenario") or root
-    )
+    # ── Session metadata from text ─────────────────────────────────────────────
+    president = None
+    pres_m = _PRESIDENT_RE.search(full_text)
+    if pres_m:
+        president = pres_m.group(1).strip().rstrip(".,")
 
-    president = _first_text(session_node, [
-        "presidente", "Presidente", "presidenteSessao", "presidenteReuniao",
-    ])
-    deputies_present_str = _first_text(session_node, [
-        "deputadosPresentes", "presentes", "nPresentes",
-    ])
     deputies_present = None
-    if deputies_present_str and deputies_present_str.isdigit():
-        deputies_present = int(deputies_present_str)
-
-    # Try to extract full text
-    full_text_parts: list[str] = []
+    dep_m = _DEPUTIES_RE.search(full_text)
+    if dep_m:
+        deputies_present = int(dep_m.group(1))
 
     # ── Agenda items ───────────────────────────────────────────────────────────
-    agenda_seq = 0
-    for item_node in root.iter("pontoOrdemDia"):
-        agenda_seq += 1
-        title_raw   = _first_text(item_node, ["titulo", "Titulo", "descricao"])
-        category    = _first_text(item_node, ["categoria", "tipo", "tipoAssunto"])
-        initiatives_raw = []
-        for init_node in item_node.iter("iniciativa"):
-            ref  = _first_text(init_node, ["referencia", "numero", "num"])
-            desc = _first_text(init_node, ["descricao", "titulo"])
-            if ref or desc:
-                initiatives_raw.append({"ref": ref, "description": desc})
-
-        if title_raw:
-            result["agenda_items"].append({
-                "_seq":         agenda_seq,
-                "title":        title_raw.strip(),
-                "topic_category": category,
-                "initiatives":  initiatives_raw or None,
-            })
-
-    # ── Interventions ──────────────────────────────────────────────────────────
-    seq = 0
-    tag_sets = [
-        ("intervencao",  "orador",   "texto"),
-        ("Interveniente", "Nome",    "Texto"),
-        ("INTERVENCAO",  "ORADOR",   "TEXTO"),
-        ("interveniente", "depNome", "discurso"),
-        ("intervencao",  "nome",     "texto"),
-    ]
-
-    for container, name_tag, text_tag in tag_sets:
-        nodes = list(root.iter(container))
-        if not nodes:
+    # Look for "ORDEM DO DIA" section header then numbered items
+    ordem_m = re.search(r"ORDEM DO DIA\s*\n(.*?)(?:\n[A-ZÁÉÍÓÚ]{4,}|\Z)", full_text, re.S | re.I)
+    agenda_block = ordem_m.group(1) if ordem_m else full_text[:3000]
+    for m in _AGENDA_RE.finditer(agenda_block):
+        seq_num = int(m.group(1))
+        title   = m.group(2).strip()
+        if len(title) < 5:
             continue
-        for node in nodes:
-            speaker = _first_text(node, [name_tag, name_tag.lower(), name_tag.upper()])
-            party   = _first_text(node, ["partido", "Partido", "GP", "gp"])
-            itype   = _first_text(node, ["tipo", "tipoIntervencao", "Tipo"]) or "intervenção"
-            text_elem = (
-                node.find(text_tag) or
-                node.find(text_tag.lower()) or
-                node.find(text_tag.upper())
-            )
-            text_content = _extract_text(text_elem) if text_elem is not None else None
-            if not speaker or not text_content or len(text_content) < 20:
-                continue
-
-            seq += 1
-            full_text_parts.append(f"{speaker}: {text_content}")
-            stage = _extract_stage_directions(text_content)
-            wc = _count_words(text_content)
-            filler_total, filler_detail = _filler_count(text_content)
-
-            result["interventions"].append({
-                "deputy_name":              speaker.strip(),
-                "party":                    party,
-                "type":                     itype,
-                "sequence_number":          seq,
-                "text":                     text_content.strip(),
-                "word_count":               wc,
-                "estimated_duration_seconds": int(wc / 2.5),  # ~150 words/min
-                "applause_from":            stage["applause_from"] or None,
-                "protests_from":            stage["protests_from"] or None,
-                "interrupted_by":           stage["interrupted_by"] or None,
-                "was_mic_cutoff":           _detect_cutoff(text_content),
-                "filler_word_count":        filler_total,
-                "filler_words_detail":      filler_detail if filler_detail else None,
-            })
-        if result["interventions"]:
-            break  # found the right schema
-
-    # ── Votes ──────────────────────────────────────────────────────────────────
-    vote_seq = 0
-    for vote_node in root.iter("votacao"):
-        vote_seq += 1
-        desc   = _first_text(vote_node, ["descricao", "assunto", "titulo", "resultado"])
-        result_ = _first_text(vote_node, ["resultado", "decisao"]) or ""
-        ref    = _first_text(vote_node, ["referencia", "iniciativa", "num"])
-
-        favor_raw   = _first_text(vote_node, ["favor",     "a_favor",  "votos_favor"])
-        against_raw = _first_text(vote_node, ["contra",    "votos_contra"])
-        abstain_raw = _first_text(vote_node, ["abstencao", "abstencoes"])
-
-        def _party_list(raw: Optional[str]) -> list[str]:
-            if not raw:
-                return []
-            return [p.strip() for p in re.split(r"[,;]", raw) if p.strip()]
-
-        # Dissidents: deputies who broke party line
-        dissidents = []
-        for dis_node in vote_node.iter("disidente"):
-            name  = _first_text(dis_node, ["nome", "depNome"])
-            party = _first_text(dis_node, ["partido", "GP"])
-            vote  = _first_text(dis_node, ["voto", "sentido"])
-            if name:
-                dissidents.append({"name": name, "party": party, "vote": vote})
-
-        # Determine result label
-        result_lower = result_.lower()
-        if "aprovad" in result_lower:
-            result_label = "aprovado"
-        elif "rejeitad" in result_lower:
-            result_label = "rejeitado"
-        elif "retirad" in result_lower:
-            result_label = "retirado"
-        else:
-            result_label = result_ or None
-
-        result["votes"].append({
-            "initiative_reference": ref,
-            "description":          desc,
-            "result":               result_label,
-            "favor":                _party_list(favor_raw),
-            "against":              _party_list(against_raw),
-            "abstain":              _party_list(abstain_raw),
-            "dissidents":           dissidents or None,
-            "sequence_number":      vote_seq,
+        result["agenda_items"].append({
+            "_seq":           seq_num,
+            "title":          title,
+            "topic_category": None,
+            "initiatives":    None,
         })
 
+    # ── Split text into speaker blocks ────────────────────────────────────────
+    # Find all speaker-start positions
+    matches = list(_SPEAKER_RE.finditer(full_text))
+    if not matches:
+        print("  PDF: no speaker markers found — cannot parse interventions")
+    else:
+        full_text_parts: list[str] = []
+        seq = 0
+        for i, m in enumerate(matches):
+            speaker_name  = m.group(1).strip()
+            party         = m.group(2).strip() if m.group(2) else None
+            block_start   = m.end()
+            block_end     = matches[i + 1].start() if i + 1 < len(matches) else len(full_text)
+            speech_text   = full_text[block_start:block_end].strip()
+
+            # Skip very short blocks (page headers, procedural one-liners)
+            if len(speech_text) < 30:
+                continue
+
+            # Classify type by name/role
+            if "Presidente" in speaker_name and not party:
+                itype = "presidência"
+            elif re.search(r"Ministr[ao]|Secretári[ao]|Primeiro-Ministr", speaker_name):
+                itype = "governo"
+            else:
+                itype = "intervenção"
+
+            seq += 1
+            full_text_parts.append(f"{speaker_name}: {speech_text}")
+            stage = _extract_stage_directions(speech_text)
+            wc = _count_words(speech_text)
+            filler_total, filler_detail = _filler_count(speech_text)
+
+            result["interventions"].append({
+                "deputy_name":                speaker_name,
+                "party":                      party,
+                "type":                       itype,
+                "sequence_number":            seq,
+                "text":                       speech_text,
+                "word_count":                 wc,
+                "estimated_duration_seconds": int(wc / 2.5),  # ~150 words/min
+                "applause_from":              stage["applause_from"] or None,
+                "protests_from":              stage["protests_from"] or None,
+                "interrupted_by":             stage["interrupted_by"] or None,
+                "was_mic_cutoff":             _detect_cutoff(speech_text),
+                "filler_word_count":          filler_total,
+                "filler_words_detail":        filler_detail if filler_detail else None,
+            })
+
+    # ── Votes ──────────────────────────────────────────────────────────────────
+    # Split on vote result sentences
+    vote_segs = re.split(
+        r"(?=(?:Submetid[ao]|Colocad[ao]|Posta)\s+à\s+votação)",
+        full_text, flags=re.I,
+    )
+    vote_seq = 0
+    for seg in vote_segs[1:]:  # skip preamble before first vote
+        # Take the first ~500 chars of the segment (the actual vote description)
+        vote_block = seg[:500]
+        if not _VOTE_RESULT_RE.search(vote_block):
+            continue
+        vote_seq += 1
+        result["votes"].append(_parse_vote_block(vote_block, vote_seq))
+
     # ── Vote declarations ──────────────────────────────────────────────────────
-    for decl_node in root.iter("declaracaoVoto"):
-        deputy = _first_text(decl_node, ["orador", "nome", "depNome"])
-        party  = _first_text(decl_node, ["partido", "GP"])
-        text_elem = decl_node.find("texto") or decl_node.find("Texto")
-        text = _extract_text(text_elem) if text_elem is not None else _extract_text(decl_node)
-        if deputy and len(text) > 10:
+    # "Declaração de voto do/a Deputado/a [Name] ([Party]): ..."
+    for decl_m in re.finditer(
+        r"[Dd]eclara[çc][aã]o de voto\s+d[ao]?\s*(?:Deputad[ao]\s+)?([^(:]+?)(?:\s*\(([^)]+)\))?\s*:\s*(.+?)(?=\n[A-ZÁÉÍÓÚ]|\Z)",
+        full_text, re.S,
+    ):
+        deputy = decl_m.group(1).strip()
+        party  = decl_m.group(2).strip() if decl_m.group(2) else None
+        text   = decl_m.group(3).strip()
+        if len(text) > 10:
             result["vote_declarations"].append({
                 "party":       party,
                 "deputy_name": deputy,
-                "text":        text.strip(),
+                "text":        text,
             })
 
     result["session"] = {
         "president_name":   president,
         "deputies_present": deputies_present,
-        "full_text":        "\n\n".join(full_text_parts),
+        "full_text":        full_text,
         "session_number":   int(session_meta.get("number", 0) or 0),
         "dar_url":          session_meta.get("dar_xml_url", ""),
         "legislatura":      leg,
@@ -526,19 +720,19 @@ def upsert_to_supabase(
             "was_mic_cutoff":            intvn.get("was_mic_cutoff", False),
             "filler_word_count":         intvn.get("filler_word_count", 0),
             "filler_words_detail":       json.dumps(intvn["filler_words_detail"]) if intvn.get("filler_words_detail") else None,
+            "applause_from":             intvn.get("applause_from") or None,
+            "protests_from":             intvn.get("protests_from") or None,
+            "interrupted_by":            intvn.get("interrupted_by") or None,
         }
-        if intvn.get("applause_from"):
-            row["applause_from"] = intvn["applause_from"]
-        if intvn.get("protests_from"):
-            row["protests_from"] = intvn["protests_from"]
-        if intvn.get("interrupted_by"):
-            row["interrupted_by"] = intvn["interrupted_by"]
         interventions_to_insert.append(row)
 
     if interventions_to_insert:
-        # Batch insert in chunks of 50
+        # Batch insert in chunks of 50; normalize each chunk so every row has
+        # identical keys (Supabase PGRST102 requires uniform object shapes).
         for i in range(0, len(interventions_to_insert), 50):
             chunk = interventions_to_insert[i:i+50]
+            all_keys = set().union(*[r.keys() for r in chunk])
+            chunk = [{k: r.get(k) for k in all_keys} for r in chunk]
             _supa_upsert("interventions", chunk)
         print(f"  Inserted {len(interventions_to_insert)} interventions")
 
@@ -608,23 +802,23 @@ def _ensure_session(date: str, leg: str, num: str, dar_url: str) -> Optional[str
 
 # ─── Commands ──────────────────────────────────────────────────────────────────
 
-def cmd_index(leg: str = "XVII"):
+def cmd_index(leg: str = "XVII", sessao: int = 1):
     """List all DAR sessions for a legislature."""
-    sessions = fetch_dar_session_list(leg=leg)
+    sessions = fetch_dar_session_list(leg=leg, sessao=sessao)
     if not sessions:
         print("No sessions found.")
         return
     print(f"\n{'NUM':<8} {'DATE':<12} {'TITLE'}")
     print("─" * 72)
     for s in sessions:
-        has_xml = "✓" if s.get("dar_xml_url") else "✗"
-        print(f"{s['number']:<8} {s['date']:<12} [{has_xml} XML] {s['title'][:45]}")
+        has_pdf = "✓" if s.get("dar_xml_url") else "✗"
+        print(f"{s['number']:<8} {s['date']:<12} [{has_pdf} PDF] {s['title'][:45]}")
     print(f"\nTotal: {len(sessions)} sessions")
 
 
-def cmd_download(leg: str = "XVII", n: int = 10):
-    """Download and cache XML files for N most recent sessions."""
-    sessions = fetch_dar_session_list(leg=leg, max_sessions=n)
+def cmd_download(leg: str = "XVII", sessao: int = 1, n: int = 10):
+    """Download and cache DAR PDFs for N most recent sessions."""
+    sessions = fetch_dar_session_list(leg=leg, sessao=sessao, max_sessions=n)
     downloaded = 0
     for s in sessions:
         if not s.get("dar_xml_url"):
@@ -645,9 +839,9 @@ def cmd_download(leg: str = "XVII", n: int = 10):
     print(f"\nDownloaded {downloaded} new files.")
 
 
-def cmd_parse(leg: str = "XVII", session_date: Optional[str] = None, session_num: Optional[str] = None):
+def cmd_parse(leg: str = "XVII", sessao: int = 1, session_date: Optional[str] = None, session_num: Optional[str] = None):
     """Parse one session from XML and upsert to Supabase."""
-    sessions = fetch_dar_session_list(leg=leg)
+    sessions = fetch_dar_session_list(leg=leg, sessao=sessao)
     target = None
 
     if session_date:
@@ -662,12 +856,12 @@ def cmd_parse(leg: str = "XVII", session_date: Optional[str] = None, session_num
     print(f"\nParsing session {target['number']} ({target['date']}) …")
     raw = download_dar_xml(leg, target)
     if not raw:
-        print("Failed to download XML.")
+        print("Failed to download PDF.")
         return
 
-    parsed = parse_dar_xml(raw, target, leg)
+    parsed = parse_dar_pdf(raw, target, leg)
     if not parsed:
-        print("Failed to parse XML.")
+        print("Failed to parse PDF.")
         return
 
     if not SUPABASE_URL:
@@ -686,9 +880,9 @@ def cmd_parse(leg: str = "XVII", session_date: Optional[str] = None, session_num
     print(f"\nDone: session {target['date']}")
 
 
-def cmd_run(leg: str = "XVII", n: int = 5):
+def cmd_run(leg: str = "XVII", sessao: int = 1, n: int = 5):
     """Full pipeline: index → download → parse → upsert for N most recent sessions."""
-    sessions = fetch_dar_session_list(leg=leg, max_sessions=n)
+    sessions = fetch_dar_session_list(leg=leg, sessao=sessao, max_sessions=n)
     if not sessions:
         print("No sessions found.")
         return
@@ -710,7 +904,7 @@ def cmd_run(leg: str = "XVII", n: int = 5):
             time.sleep(RATE_LIMIT_SEC)
             continue
 
-        parsed = parse_dar_xml(raw, s, leg)
+        parsed = parse_dar_pdf(raw, s, leg)
         if not parsed or not parsed.get("interventions"):
             print("  No interventions parsed — skipping upsert")
             time.sleep(RATE_LIMIT_SEC)
@@ -741,30 +935,34 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd")
 
     p_idx = sub.add_parser("index", help="List all sessions for a legislature")
-    p_idx.add_argument("--leg", default="XVII")
+    p_idx.add_argument("--leg",    default="XVII")
+    p_idx.add_argument("--sessao", type=int, default=1)
 
-    p_dl = sub.add_parser("download", help="Download XML for N most recent sessions")
-    p_dl.add_argument("--leg", default="XVII")
-    p_dl.add_argument("--n", type=int, default=10)
+    p_dl = sub.add_parser("download", help="Download PDFs for N most recent sessions")
+    p_dl.add_argument("--leg",    default="XVII")
+    p_dl.add_argument("--sessao", type=int, default=1)
+    p_dl.add_argument("--n",      type=int, default=10)
 
     p_parse = sub.add_parser("parse", help="Parse one session into Supabase")
-    p_parse.add_argument("--leg",            default="XVII")
-    p_parse.add_argument("--session-date",   default=None)
-    p_parse.add_argument("--session-num",    default=None)
+    p_parse.add_argument("--leg",          default="XVII")
+    p_parse.add_argument("--sessao",       type=int, default=1)
+    p_parse.add_argument("--session-date", default=None)
+    p_parse.add_argument("--session-num",  default=None)
 
     p_run = sub.add_parser("run", help="Full pipeline for N most recent sessions")
-    p_run.add_argument("--leg", default="XVII")
-    p_run.add_argument("--n",   type=int, default=5)
+    p_run.add_argument("--leg",    default="XVII")
+    p_run.add_argument("--sessao", type=int, default=1)
+    p_run.add_argument("--n",      type=int, default=5)
 
     args = parser.parse_args()
 
     if args.cmd == "index":
-        cmd_index(leg=args.leg)
+        cmd_index(leg=args.leg, sessao=args.sessao)
     elif args.cmd == "download":
-        cmd_download(leg=args.leg, n=args.n)
+        cmd_download(leg=args.leg, sessao=args.sessao, n=args.n)
     elif args.cmd == "parse":
-        cmd_parse(leg=args.leg, session_date=args.session_date, session_num=args.session_num)
+        cmd_parse(leg=args.leg, sessao=args.sessao, session_date=args.session_date, session_num=args.session_num)
     elif args.cmd == "run":
-        cmd_run(leg=args.leg, n=args.n)
+        cmd_run(leg=args.leg, sessao=args.sessao, n=args.n)
     else:
         parser.print_help()

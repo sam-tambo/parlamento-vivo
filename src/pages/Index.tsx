@@ -1,233 +1,319 @@
 import { motion } from "framer-motion";
-import { Mic, Ear, Brain, BarChart3, ArrowRight, Zap, Radio, GitCompare, BookOpen, Archive, Search } from "lucide-react";
-import { Link } from "react-router-dom";
+import { ArrowRight, Search, FileText, Vote, Mic, CheckCircle, XCircle } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { SpeechCard } from "@/components/SpeechCard";
-import { SessionCard } from "@/components/SessionCard";
-import { usePoliticians, useSpeeches, useSessions } from "@/lib/queries";
-import { gradeFillerRate } from "@/lib/filler-words";
+import { Badge } from "@/components/ui/badge";
+import { AIDisclaimer } from "@/components/AIDisclaimer";
+import { useSessions, useLatestVotes, useGlobalStats } from "@/lib/queries";
+import { PARTY_COLORS } from "@/lib/mock-data";
 
-const steps = [
-  { icon: Ear,      title: "1. Monitorização",     desc: "O worker captura o stream ARTV Plenário em tempo real via HLS." },
-  { icon: Brain,    title: "2. Transcrição IA",     desc: "Whisper transcreve áudio e pyannote.audio identifica cada orador." },
-  { icon: Mic,      title: "3. Análise de discurso", desc: "30+ palavras de enchimento detectadas automaticamente em português." },
-  { icon: BarChart3,title: "4. Rankings ao vivo",   desc: "Deputados classificados por rácio de enchimento, tempo e participação." },
-];
-
-const features = [
-  { icon: Radio,      href: "/ao-vivo",     label: "Ao Vivo",     desc: "Transcrição em tempo real com enchimentos destacados" },
-  { icon: Mic,        href: "/discursos",   label: "Discursos",   desc: "Arquivo de intervenções com análise completa" },
-  { icon: BookOpen,   href: "/palavras",    label: "Palavras",    desc: "Catálogo de enchimentos e ranking por deputado" },
-  { icon: GitCompare, href: "/comparar",    label: "Comparar",    desc: "Radar chart lado-a-lado de dois deputados" },
-  { icon: BarChart3,  href: "/estatisticas",label: "Estatísticas",desc: "Tendências, partidos e análise temporal" },
-  { icon: Archive,    href: "/sessoes",     label: "Sessões",     desc: "Arquivo completo de sessões com IA" },
-  { icon: Search,     href: "/pesquisa",    label: "Pesquisa",    desc: "Pesquisa por tema, partido ou deputado" },
-];
+const MOMENT_ICONS: Record<string, string> = {
+  confrontation: "\uD83D\uDD25",
+  heated_exchange: "\uD83D\uDD25",
+  party_split: "\uD83D\uDD00",
+  mic_cutoff: "\u23F0",
+  dissident_vote: "\u26A0\uFE0F",
+  dissent: "\u26A0\uFE0F",
+  unanimous: "\uD83E\uDD1D",
+  record_filler: "\uD83D\uDDE3\uFE0F",
+};
 
 export default function Index() {
-  const { data: politicians = [] } = usePoliticians();
-  const { data: speeches = [] } = useSpeeches();
   const { data: sessions = [] } = useSessions("XVII", 1);
+  const { data: latestVotes = [] } = useLatestVotes(10);
+  const { data: stats } = useGlobalStats();
+  const [searchQuery, setSearchQuery] = useState("");
+  const navigate = useNavigate();
 
-  const active = politicians.filter(p => p.total_speeches > 0);
-  const totalFillers = politicians.reduce((s, p) => s + p.total_filler_count, 0);
-  const totalSpeeches = politicians.reduce((s, p) => s + p.total_speeches, 0);
-  const avgRatio = active.length > 0
-    ? active.reduce((s, p) => s + p.average_filler_ratio, 0) / active.length
-    : 0;
-  const grade = gradeFillerRate(avgRatio);
+  const latestSession = sessions[0];
+  const notableMoments = (latestSession?.notable_moments ?? []) as Array<{
+    type: string; description: string; deputies_involved?: string[];
+  }>;
+  const keyDecisions = (latestSession?.key_decisions ?? []) as Array<{
+    description: string; result: string; significance?: string;
+  }>;
 
-  const latestSpeeches = speeches.slice(0, 4);
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (searchQuery.trim().length >= 3) {
+      navigate(`/pesquisa?q=${encodeURIComponent(searchQuery.trim())}`);
+    }
+  };
 
   return (
     <div className="min-h-screen">
-      {/* ─── Hero ─────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden py-24 sm:py-32">
+      {/* ── Hero ────────────────────────────────────────────── */}
+      <section className="relative overflow-hidden py-16 sm:py-20">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/5 via-transparent to-transparent" />
-        <div className="container relative">
+        <div className="container relative max-w-3xl">
           <motion.div
-            initial={{ opacity: 0, y: 30 }}
+            initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
-            className="max-w-3xl mx-auto text-center"
+            className="text-center mb-10"
           >
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/20 bg-primary/5 mb-8">
-              <Zap className="h-3.5 w-3.5 text-primary" />
-              <span className="text-xs font-medium text-primary">Análise de discurso parlamentar ao vivo</span>
-            </div>
-            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-bold tracking-tight leading-[1.1] mb-6">
-              Quão vazio é o{" "}
-              <span className="text-gradient-gold">discurso</span>
-              <br />
-              parlamentar?
+            <h1 className="text-3xl sm:text-5xl font-bold tracking-tight leading-[1.15] mb-4">
+              O que aconteceu no{" "}
+              <span className="text-primary">Parlamento</span>
             </h1>
-            <p className="text-lg sm:text-xl text-muted-foreground max-w-xl mx-auto mb-10">
-              Analisamos as sessões plenárias da ARTV em tempo real — detetamos enchimentos,
-              medimos participação e comparamos cada deputado.
+            <p className="text-base sm:text-lg text-muted-foreground max-w-lg mx-auto">
+              Democracia portuguesa explicada em 2 minutos.
+              Sessões, votações e intervenções — tudo aberto.
             </p>
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Link to="/ao-vivo">
-                <Button size="lg" className="gap-2 font-semibold">
-                  <Radio className="h-4 w-4 animate-pulse" /> Ver ao Vivo
-                </Button>
-              </Link>
-              <Link to="/estatisticas">
-                <Button variant="outline" size="lg" className="gap-2">
-                  <BarChart3 className="h-4 w-4" /> Estatísticas
-                </Button>
-              </Link>
-            </div>
           </motion.div>
 
-          {/* Counters */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.3, duration: 0.5 }}
-            className="mt-16 grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl mx-auto"
+          {/* Search bar */}
+          <motion.form
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            onSubmit={handleSearch}
+            className="relative max-w-xl mx-auto mb-12"
           >
-            {[
-              { label: "discursos",  value: totalSpeeches },
-              { label: "enchimentos",value: totalFillers },
-              { label: "rácio médio",value: `${(avgRatio * 100).toFixed(1)}%` },
-              { label: "qualidade",  value: grade.label, style: { color: grade.color } },
-            ].map(({ label, value, style }) => (
-              <div key={label} className="glass-card glow-gold rounded-2xl px-4 py-5 text-center">
-                <p className="text-3xl sm:text-4xl font-bold font-mono" style={style ?? undefined}>
-                  {typeof value === "number" ? value : <span className="text-gradient-gold">{value}</span>}
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">{label}</p>
-              </div>
-            ))}
-          </motion.div>
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Pesquisar no parlamento..."
+              className="w-full pl-11 pr-4 py-3 rounded-xl bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+            />
+          </motion.form>
+
+          {/* Quick stats bar */}
+          {stats && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2 }}
+              className="grid grid-cols-3 gap-3 max-w-md mx-auto"
+            >
+              {[
+                { icon: FileText, label: "sessões",      value: stats.sessions },
+                { icon: Mic,      label: "intervenções",  value: stats.interventions },
+                { icon: Vote,     label: "votações",      value: stats.votes },
+              ].map(({ icon: Icon, label, value }) => (
+                <div key={label} className="glass-card rounded-xl px-3 py-3 text-center">
+                  <Icon className="h-4 w-4 text-primary mx-auto mb-1" />
+                  <p className="text-xl font-bold font-mono">{value.toLocaleString("pt-PT")}</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</p>
+                </div>
+              ))}
+            </motion.div>
+          )}
         </div>
       </section>
 
-      {/* ─── Feature cards ─────────────────────────────────────── */}
-      <section className="py-12 border-t border-border/40">
-        <div className="container">
-          <h2 className="text-xl font-semibold text-center text-muted-foreground mb-8">
-            O que podes explorar
-          </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-            {features.map((f, i) => (
-              <motion.div
-                key={f.href}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.07 }}
-              >
-                <Link
-                  to={f.href}
-                  className="glass-card rounded-xl p-4 flex flex-col items-center text-center gap-2 hover:border-primary/30 hover:bg-primary/5 transition-all group block"
-                >
-                  <f.icon className="h-5 w-5 text-primary group-hover:scale-110 transition-transform" />
-                  <p className="text-sm font-semibold">{f.label}</p>
-                  <p className="text-xs text-muted-foreground leading-snug hidden sm:block">{f.desc}</p>
-                </Link>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ─── Latest session ────────────────────────────────────── */}
-      {sessions.length > 0 && sessions[0].summary_pt && (
+      {/* ── Última sessão — hero card ───────────────────────── */}
+      {latestSession?.summary_pt && (
         <section className="py-8 border-t border-border/40">
           <div className="container max-w-3xl">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold">Última Sessão Plenária</h2>
+              <h2 className="text-lg font-bold">Última Sessão</h2>
               <Link to="/sessoes">
-                <Button variant="ghost" size="sm" className="gap-1.5 text-primary">
-                  Ver todas <ArrowRight className="h-3.5 w-3.5" />
+                <Button variant="ghost" size="sm" className="gap-1.5 text-primary text-xs">
+                  Todas as sessões <ArrowRight className="h-3 w-3" />
                 </Button>
               </Link>
             </div>
-            <SessionCard session={{
-              id:              sessions[0].id,
-              date:            sessions[0].date,
-              session_number:  sessions[0].session_number,
-              legislatura:     sessions[0].legislatura,
-              dar_url:         sessions[0].dar_url,
-              summary_pt:      sessions[0].summary_pt,
-              analysis_status: sessions[0].analysis_status,
-              deputies_present: sessions[0].deputies_present,
-            }} />
+            <Link to={`/sessao/${latestSession.id}`}>
+              <motion.div
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="glass-card rounded-xl p-5 hover:border-primary/30 transition-all group"
+              >
+                <div className="flex items-center gap-2 mb-3">
+                  {latestSession.session_number && (
+                    <span className="text-xs font-mono text-muted-foreground">
+                      DAR I {latestSession.legislatura} nº{latestSession.session_number}
+                    </span>
+                  )}
+                  <span className="text-xs text-muted-foreground">
+                    {new Date(latestSession.date + "T12:00:00").toLocaleDateString("pt-PT", {
+                      weekday: "long", day: "numeric", month: "long", year: "numeric",
+                    })}
+                  </span>
+                </div>
+                <p className="text-sm leading-relaxed text-muted-foreground mb-3">
+                  {latestSession.summary_pt}
+                </p>
+                <div className="flex items-center gap-2 text-xs text-primary font-medium">
+                  Ler mais <ArrowRight className="h-3 w-3 group-hover:translate-x-0.5 transition-transform" />
+                </div>
+                <div className="mt-3">
+                  <AIDisclaimer />
+                </div>
+              </motion.div>
+            </Link>
           </div>
         </section>
       )}
 
-      {/* ─── Latest speeches ───────────────────────────────────── */}
-      {latestSpeeches.length > 0 && (
-        <section className="py-16 sm:py-20">
-          <div className="container">
-            <div className="flex items-center justify-between mb-8">
-              <h2 className="text-2xl sm:text-3xl font-bold">Últimos discursos</h2>
-              <Link to="/discursos">
-                <Button variant="ghost" className="gap-2 text-primary">
-                  Ver todos <ArrowRight className="h-4 w-4" />
-                </Button>
-              </Link>
+      {/* ── Key decisions ───────────────────────────────────── */}
+      {keyDecisions.length > 0 && (
+        <section className="py-8 border-t border-border/40">
+          <div className="container max-w-3xl">
+            <h2 className="text-lg font-bold mb-4">Decisões Principais</h2>
+            <div className="space-y-2">
+              {keyDecisions.slice(0, 5).map((d, i) => {
+                const approved = d.result === "aprovado";
+                return (
+                  <motion.div
+                    key={i}
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.04 }}
+                    className="glass-card rounded-lg p-3 flex items-start gap-3"
+                  >
+                    {approved
+                      ? <CheckCircle className="h-4 w-4 mt-0.5 shrink-0 text-green-500" />
+                      : <XCircle className="h-4 w-4 mt-0.5 shrink-0 text-red-500" />
+                    }
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium">{d.description}</p>
+                      {d.significance && (
+                        <p className="text-xs text-muted-foreground mt-0.5">{d.significance}</p>
+                      )}
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] px-1.5 py-0 capitalize shrink-0"
+                      style={{
+                        borderColor: approved ? "#4CAF50" : "#F44336",
+                        color: approved ? "#4CAF50" : "#F44336",
+                      }}
+                    >
+                      {d.result}
+                    </Badge>
+                  </motion.div>
+                );
+              })}
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {latestSpeeches.map((s, i) => (
-                <SpeechCard
-                  key={s.id}
-                  politician={s.politician}
-                  session_date={s.session_date ?? ""}
-                  speaking_duration_seconds={s.speaking_duration_seconds}
-                  filler_word_count={s.filler_word_count}
-                  total_word_count={s.total_word_count}
-                  filler_ratio={s.filler_ratio}
-                  transcript_excerpt={s.transcript_excerpt ?? undefined}
-                  filler_words_detail={s.filler_words_detail ?? undefined}
-                  index={i}
-                />
+          </div>
+        </section>
+      )}
+
+      {/* ── Votações recentes — horizontal scroll strip ──── */}
+      {latestVotes.length > 0 && (
+        <section className="py-8 border-t border-border/40">
+          <div className="container">
+            <h2 className="text-lg font-bold mb-4">Votações Recentes</h2>
+            <div className="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 sm:mx-0 sm:px-0 snap-x">
+              {latestVotes.map((v, i) => {
+                const isApproved = v.result === "aprovado";
+                return (
+                  <motion.div
+                    key={v.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.03 }}
+                  >
+                    <Link
+                      to={`/sessao/${v.session_id}`}
+                      className="glass-card rounded-xl p-4 min-w-[260px] max-w-[300px] shrink-0 snap-start hover:border-primary/30 transition-all block"
+                    >
+                      <div className="flex items-start gap-2 mb-2">
+                        {v.initiative_reference && (
+                          <span className="text-[10px] font-mono text-muted-foreground truncate">
+                            {v.initiative_reference}
+                          </span>
+                        )}
+                        <Badge
+                          variant="outline"
+                          className="ml-auto text-[10px] px-1.5 py-0 capitalize shrink-0"
+                          style={{
+                            borderColor: isApproved ? "#4CAF50" : "#F44336",
+                            color: isApproved ? "#4CAF50" : "#F44336",
+                          }}
+                        >
+                          {v.result === "aprovado" ? "Aprovado" : v.result === "rejeitado" ? "Rejeitado" : v.result ?? "?"}
+                        </Badge>
+                      </div>
+                      <p className="text-xs font-medium leading-snug line-clamp-2 mb-3">
+                        {v.description ?? "Votação"}
+                      </p>
+                      {/* Party dots — solid = favor, faded = against */}
+                      <div className="flex gap-1 flex-wrap">
+                        {(v.favor ?? []).map(p => (
+                          <span
+                            key={`f-${p}`}
+                            className="h-2.5 w-2.5 rounded-full"
+                            title={`${p} — A favor`}
+                            style={{ background: PARTY_COLORS[p] ?? "#888" }}
+                          />
+                        ))}
+                        {(v.against ?? []).map(p => (
+                          <span
+                            key={`a-${p}`}
+                            className="h-2.5 w-2.5 rounded-full opacity-30"
+                            title={`${p} — Contra`}
+                            style={{ background: PARTY_COLORS[p] ?? "#888" }}
+                          />
+                        ))}
+                      </div>
+                    </Link>
+                  </motion.div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── Destaques — notable moments ─────────────────── */}
+      {notableMoments.length > 0 && (
+        <section className="py-8 border-t border-border/40">
+          <div className="container max-w-3xl">
+            <h2 className="text-lg font-bold mb-4">Destaques</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {notableMoments.slice(0, 6).map((m, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.05 }}
+                  className="glass-card rounded-xl p-4"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <span className="text-lg shrink-0" aria-hidden>
+                      {MOMENT_ICONS[m.type] ?? "\uD83D\uDCCC"}
+                    </span>
+                    <div className="min-w-0">
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 mb-1 capitalize">
+                        {m.type?.replace(/_/g, " ")}
+                      </Badge>
+                      <p className="text-sm text-muted-foreground leading-snug">
+                        {m.description}
+                      </p>
+                      {m.deputies_involved && m.deputies_involved.length > 0 && (
+                        <p className="text-[10px] text-muted-foreground/60 mt-1">
+                          {m.deputies_involved.join(", ")}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
               ))}
             </div>
           </div>
         </section>
       )}
 
-      {/* ─── How it works ──────────────────────────────────────── */}
-      <section className="py-16 sm:py-24 border-t border-border/50">
-        <div className="container">
-          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-12">Como funciona</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {steps.map((step, i) => (
-              <motion.div
-                key={step.title}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: i * 0.1 }}
-                className="glass-card rounded-xl p-6 text-center"
-              >
-                <div className="inline-flex items-center justify-center h-12 w-12 rounded-xl bg-primary/10 mb-4">
-                  <step.icon className="h-6 w-6 text-primary" />
-                </div>
-                <h3 className="font-semibold mb-2">{step.title}</h3>
-                <p className="text-sm text-muted-foreground">{step.desc}</p>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ─── Footer ────────────────────────────────────────────── */}
-      <footer className="border-t border-border/50 py-8">
-        <div className="container text-center text-sm text-muted-foreground">
+      {/* ── Footer ──────────────────────────────────────── */}
+      <footer className="border-t border-border/50 py-8 mt-8">
+        <div className="container text-center text-xs text-muted-foreground space-y-1">
+          <p>Parlamento Vivo — Transparência parlamentar para todos.</p>
           <p>
-            Parlamento Vivo · Fonte:{" "}
+            Fonte:{" "}
             <a
-              href="https://canal.parlamento.pt/plenario"
+              href="https://www.parlamento.pt"
               target="_blank"
               rel="noopener noreferrer"
               className="text-primary hover:underline"
             >
-              ARTV Plenário
-            </a>{" "}
-            · Dados processados por IA, não representam posições oficiais.
+              parlamento.pt
+            </a>
+            {" "}&middot; Dados processados por IA, não representam posições oficiais.
           </p>
         </div>
       </footer>

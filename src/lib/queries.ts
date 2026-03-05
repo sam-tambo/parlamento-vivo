@@ -629,6 +629,160 @@ export function usePartyPositions(party?: string, topic?: string) {
   });
 }
 
+// ─── Homepage aggregates ─────────────────────────────────────────────────────
+
+export function useLatestVotes(limit: number = 10) {
+  return useQuery({
+    queryKey: ["latest_votes", limit],
+    queryFn: async (): Promise<(Vote & { session_date?: string })[]> => {
+      const { data, error } = await supabase
+        .from("votes")
+        .select("*, session:sessions(date)")
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []).map((v: any) => ({
+        ...v,
+        session_date: v.session?.date ?? null,
+      })) as (Vote & { session_date?: string })[];
+    },
+    staleTime: 60_000,
+  });
+}
+
+export function useGlobalStats() {
+  return useQuery({
+    queryKey: ["global_stats"],
+    queryFn: async () => {
+      const [sessionsRes, interventionsRes, votesRes] = await Promise.all([
+        supabase.from("sessions").select("id", { count: "exact", head: true }),
+        supabase.from("interventions").select("id", { count: "exact", head: true }),
+        supabase.from("votes").select("id", { count: "exact", head: true }),
+      ]);
+      return {
+        sessions: sessionsRes.count ?? 0,
+        interventions: interventionsRes.count ?? 0,
+        votes: votesRes.count ?? 0,
+      };
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
+// ─── Deputy profile ──────────────────────────────────────────────────────────
+
+export interface DeputyProfile {
+  id: string;
+  name: string;
+  full_name: string | null;
+  party: string;
+  constituency: string | null;
+  photo_url: string | null;
+  parlamento_url: string | null;
+  total_speaking_seconds: number;
+  total_filler_count: number;
+  total_speeches: number;
+  total_words: number;
+  average_filler_ratio: number;
+}
+
+export function useDeputyProfile(id: string | undefined) {
+  return useQuery({
+    queryKey: ["deputy_profile", id],
+    queryFn: async (): Promise<DeputyProfile | null> => {
+      if (!id) return null;
+      const { data, error } = await supabase
+        .from("politicians")
+        .select("*")
+        .eq("id", id)
+        .maybeSingle();
+      if (error) throw error;
+      return data as unknown as DeputyProfile | null;
+    },
+    enabled: !!id,
+    staleTime: 60_000,
+  });
+}
+
+export function useDeputyInterventions(deputyName: string | undefined, limit: number = 20) {
+  return useQuery({
+    queryKey: ["deputy_interventions", deputyName, limit],
+    queryFn: async (): Promise<(Intervention & { session_date?: string })[]> => {
+      if (!deputyName) return [];
+      const { data, error } = await supabase
+        .from("interventions")
+        .select("*, session:sessions(date)")
+        .eq("deputy_name", deputyName)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []).map((iv: any) => ({
+        ...iv,
+        session_date: iv.session?.date ?? null,
+      })) as (Intervention & { session_date?: string })[];
+    },
+    enabled: !!deputyName,
+    staleTime: 60_000,
+  });
+}
+
+export function useDeputyVoteDissidences(deputyName: string | undefined) {
+  return useQuery({
+    queryKey: ["deputy_dissidences", deputyName],
+    queryFn: async (): Promise<{ total_votes: number; dissidences: number }> => {
+      if (!deputyName) return { total_votes: 0, dissidences: 0 };
+      // Get all votes and check dissidents array for this deputy
+      const { data, error } = await supabase
+        .from("votes")
+        .select("dissidents")
+        .not("dissidents", "is", null);
+      if (error) return { total_votes: 0, dissidences: 0 };
+      const allVotes = data ?? [];
+      let dissidences = 0;
+      for (const v of allVotes) {
+        const diss = v.dissidents as Array<{ name: string }> | null;
+        if (diss?.some(d => d.name === deputyName)) dissidences++;
+      }
+      // Total votes is approximate — count all votes
+      const { count } = await supabase.from("votes").select("id", { count: "exact", head: true });
+      return { total_votes: count ?? 0, dissidences };
+    },
+    enabled: !!deputyName,
+    staleTime: 5 * 60_000,
+  });
+}
+
+// ─── Vote declarations ───────────────────────────────────────────────────────
+
+export interface VoteDeclaration {
+  id: string;
+  vote_id: string;
+  session_id: string;
+  deputy_name: string;
+  party: string | null;
+  declaration_text: string;
+}
+
+export function useVoteDeclarations(sessionId: string | undefined) {
+  return useQuery({
+    queryKey: ["vote_declarations", sessionId],
+    queryFn: async (): Promise<VoteDeclaration[]> => {
+      if (!sessionId) return [];
+      const { data, error } = await supabase
+        .from("vote_declarations")
+        .select("*")
+        .eq("session_id", sessionId);
+      if (error) {
+        console.warn("[vote_declarations]", error.message);
+        return [];
+      }
+      return (data ?? []) as unknown as VoteDeclaration[];
+    },
+    enabled: !!sessionId,
+    staleTime: 60_000,
+  });
+}
+
 export function useFillerTrend() {
   return useQuery({
     queryKey: ["filler_trend"],
