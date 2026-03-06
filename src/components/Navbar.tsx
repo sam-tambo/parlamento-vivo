@@ -1,15 +1,16 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { BarChart3, Users, Search, Menu, X, FileText, Home } from "lucide-react";
+import { BarChart3, Users, Search, Menu, X, FileText, Home, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 
 const navItems = [
-  { path: "/",             label: "Início",        icon: Home         },
-  { path: "/sessoes",      label: "Sessões",       icon: FileText     },
-  { path: "/deputados",    label: "Deputados",     icon: Users        },
-  { path: "/pesquisa",     label: "Pesquisa",      icon: Search       },
-  { path: "/estatisticas", label: "Estatísticas",  icon: BarChart3    },
+  { path: "/",             label: "Início",        icon: Home,      live: false },
+  { path: "/sessoes",      label: "Sessões",       icon: FileText,  live: false },
+  { path: "/ao-vivo",      label: "Ao Vivo",       icon: Radio,     live: true  },
+  { path: "/deputados",    label: "Deputados",     icon: Users,     live: false },
+  { path: "/pesquisa",     label: "Pesquisa",      icon: Search,    live: false },
+  { path: "/estatisticas", label: "Estatísticas",  icon: BarChart3, live: false },
 ];
 
 export function Navbar() {
@@ -34,7 +35,7 @@ export function Navbar() {
 
         {/* Desktop nav */}
         <div className="hidden md:flex items-center gap-1">
-          {navItems.map(({ path, label, icon: Icon }) => (
+          {navItems.map(({ path, label, icon: Icon, live }) => (
             <Link
               key={path}
               to={path}
@@ -45,7 +46,12 @@ export function Navbar() {
                   : "text-muted-foreground hover:text-foreground hover:bg-accent"
               )}
             >
-              <Icon className="h-3.5 w-3.5" />
+              <span className="relative">
+                <Icon className="h-3.5 w-3.5" />
+                {live && (
+                  <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+                )}
+              </span>
               <span>{label}</span>
             </Link>
           ))}
@@ -71,7 +77,7 @@ export function Navbar() {
             className="md:hidden border-t border-border/40 bg-background/95 backdrop-blur-xl overflow-hidden"
           >
             <div className="container py-2 space-y-0.5">
-              {navItems.map(({ path, label, icon: Icon }) => (
+              {navItems.map(({ path, label, icon: Icon, live }) => (
                 <Link
                   key={path}
                   to={path}
@@ -83,7 +89,12 @@ export function Navbar() {
                       : "text-muted-foreground hover:text-foreground hover:bg-accent"
                   )}
                 >
-                  <Icon className="h-4 w-4" />
+                  <span className="relative">
+                    <Icon className="h-4 w-4" />
+                    {live && (
+                      <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+                    )}
+                  </span>
                   <span>{label}</span>
                 </Link>
               ))}
